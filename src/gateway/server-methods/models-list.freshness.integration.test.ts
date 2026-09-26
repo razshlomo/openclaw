@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { createServer, type ServerResponse } from "node:http";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { ModelsListResult } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
 import { createDeferred, withTestTimeout } from "../../../test/helpers/promise.js";
 import { getPublishedPreparedModelCatalogOwnerSnapshot } from "../../agents/prepared-model-catalog.js";
@@ -34,6 +34,7 @@ it.for([
     const sibling = "z-failing-fixture";
     const providers = withSibling ? [provider, sibling] : [provider];
     let requests = 0;
+    let siblingRequests = 0;
     let hold = false;
     const renewal = createDeferred();
     let fail = false;
@@ -47,6 +48,7 @@ it.for([
     };
     const endpoint = createServer((request, response) => {
       if (request.url === `/${sibling}`) {
+        siblingRequests++;
         response.writeHead(failSibling ? 503 : 200, { "content-type": "application/json" });
         response.end(JSON.stringify(["sibling"]));
         return;
@@ -137,6 +139,9 @@ it.for([
         token,
         scopes: ["operator.admin"],
       });
+      const realNow = Date.now;
+      let nowOffset = 0;
+      const dateNow = vi.spyOn(Date, "now").mockImplementation(() => realNow() + nowOffset);
       try {
         await server.startupSettled;
         const list = async (refresh = false) => {
@@ -242,6 +247,11 @@ it.for([
           fail = true;
           expire([provider]);
         }
+        const previousRequests = [requests, siblingRequests];
+        await list();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect([requests, siblingRequests]).toEqual(previousRequests);
+        nowOffset += 10 * 60_000;
         const failed = await waitForCatalogPublication({
           signal,
           read: list,
@@ -250,6 +260,7 @@ it.for([
         expect(failed.refreshFailed).toBe(true);
         if (withSibling && !initiallyEmpty) {
           advertised = ["original", "newly-published", "after-sibling-failure"];
+          nowOffset += 10 * 60_000;
           const afterSiblingFailure = await acceptRenewal(() => {
             expire([provider]);
             return list();
@@ -280,6 +291,7 @@ it.for([
         });
         expect(recovered.refreshFailed).not.toBe(true);
       } finally {
+        dateNow.mockRestore();
         hold = false;
         for (const response of held.splice(0)) {
           reply(response);

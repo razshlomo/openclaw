@@ -56,6 +56,8 @@ import type {
 export const MAX_CONCURRENT_FULL_MODEL_CATALOG_BUILDS = 1;
 const limitFullModelCatalogBuild = pLimit(MAX_CONCURRENT_FULL_MODEL_CATALOG_BUILDS);
 const MODEL_CATALOG_FOREGROUND_WAIT_MS = 5_000;
+// Local mitigation for #155753: expiry-driven reads may otherwise rebuild continuously.
+const EXPIRED_CATALOG_REFRESH_MIN_INTERVAL_MS = 10 * 60_000;
 
 export function createFullModelCatalogAccess(
   params: PreparedModelRuntimeCatalogAccessParams,
@@ -248,14 +250,20 @@ export function createFullModelCatalogAccess(
     params.inventoryOwner.catalogInventory = inventory;
     return { previous, current: published, staticCatalog };
   };
+  let lastExpiredCatalogRefreshAt = 0;
   const refreshExpiredCatalog = () => {
     if (pending || !inventory) {
       return;
     }
-    const providerIds = listExpiredPreparedModelCatalogProviders(inventory, Date.now());
+    const now = Date.now();
+    if (now - lastExpiredCatalogRefreshAt < EXPIRED_CATALOG_REFRESH_MIN_INTERVAL_MS) {
+      return;
+    }
+    const providerIds = listExpiredPreparedModelCatalogProviders(inventory, now);
     if (!providerIds.length) {
       return;
     }
+    lastExpiredCatalogRefreshAt = now;
     queueMicrotask(() => {
       void acquireCatalog({ providerIds, refresh: true }, false).catch(() => undefined);
     });
@@ -344,7 +352,9 @@ export function createFullModelCatalogAccess(
       };
       const scopes: Array<readonly string[] | undefined> = fullRefresh
         ? [undefined]
-        : providers.map((provider) => [provider]);
+        : providers.length
+          ? [providers]
+          : [];
       for (const providerIds of scopes) {
         await limitFullModelCatalogBuild(async () => {
           assertCurrent();
