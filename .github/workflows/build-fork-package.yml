@@ -1,0 +1,35 @@
+name: Build OpenClaw fork package
+
+on:
+  push:
+    branches: [fix/catalog-wal-upstream-20260927]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build validated self-contained package
+        run: node scripts/package-openclaw-for-docker.mjs --allow-unreleased-changelog --output-dir .artifacts/fork-package --output-name openclaw-fork-fixes.tgz
+      - run: sha256sum .artifacts/fork-package/openclaw-fork-fixes.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-fork-fixes-${{ github.sha }}
+          path: .artifacts/fork-package/openclaw-fork-fixes.tgz
+          if-no-files-found: error
+          retention-days: 7
