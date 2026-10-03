@@ -57,6 +57,11 @@ export const MAX_CONCURRENT_FULL_MODEL_CATALOG_BUILDS = 1;
 const limitFullModelCatalogBuild = pLimit(MAX_CONCURRENT_FULL_MODEL_CATALOG_BUILDS);
 const MODEL_CATALOG_FOREGROUND_WAIT_MS = 5_000;
 // Local mitigation for #155753: expiry-driven reads may otherwise rebuild continuously.
+// LOCAL AND TEMPORARY. This throttle and the batched provider scope below are a local
+// patch, not upstream behavior. When an official fix for #155753 ships in a release,
+// do NOT drop this code automatically. First compare the upstream semantics with this
+// patch, run the catalog refresh and load tests, and confirm there is no CPU or memory
+// regression. Only then remove the local code, in its own separate commit.
 const EXPIRED_CATALOG_REFRESH_MIN_INTERVAL_MS = 10 * 60_000;
 
 export function createFullModelCatalogAccess(
