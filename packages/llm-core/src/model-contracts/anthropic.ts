@@ -196,6 +196,7 @@ export function supportsClaudeAdaptiveThinking(ref: ClaudeModelRef): boolean {
 export function supportsClaude1MContext(ref: ClaudeModelRef): boolean {
   const modelId = resolveClaudeModelIdentity(ref);
   return (
+    resolveClaudeHaiku55ModelIdentity(ref) !== undefined ||
     resolveClaudeOpus5ModelIdentity(ref) !== undefined ||
     resolveClaudeSonnet5ModelIdentity(ref) !== undefined ||
     /(?:^|-)claude-(?:fable-5|mythos-(?:5|preview)|opus-4-(?:6|7|8)|sonnet-4-6)(?=$|[^a-z0-9])/.test(
