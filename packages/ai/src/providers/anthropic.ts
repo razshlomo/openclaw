@@ -57,6 +57,7 @@ import {
   buildAnthropicClaudeCodeIdentity,
   prepareClaudeNoPrefillRequestContext,
   resolveAnthropicThinkingEffort,
+  resolveClaudeHaiku55ModelIdentity,
   resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   resolveClaudeSonnet55ModelIdentity,
@@ -348,7 +349,11 @@ export const streamSimpleAnthropic: StreamFunction<
         ? "low"
         : "high"
       : options?.reasoning;
-  if (resolveClaudeOpus5ModelIdentity(model) || resolveClaudeSonnet5ModelIdentity(model)) {
+  if (
+    resolveClaudeOpus5ModelIdentity(model) ||
+    resolveClaudeSonnet5ModelIdentity(model) ||
+    resolveClaudeHaiku55ModelIdentity(model)
+  ) {
     return streamAnthropic(model, context, {
       ...base,
       thinkingEnabled: true,
