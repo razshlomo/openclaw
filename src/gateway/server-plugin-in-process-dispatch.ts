@@ -55,6 +55,11 @@ export function readOperatorToolGatewayAuthority(): OperatorToolGatewayAuthority
   return operatorToolGatewayAuthority.getStore();
 }
 
+/** Run outside any operator tool invocation; process-owned work must not inherit one. */
+export function runOutsideOperatorToolGatewayAuthority<T>(run: () => T): T {
+  return operatorToolGatewayAuthority.exit(run);
+}
+
 /** Retains operator attribution and authority only for the awaited tool invocation. */
 export async function withOperatorToolGatewayAuthority<T>(
   authority: Omit<OperatorToolGatewayAuthority, "signal">,
