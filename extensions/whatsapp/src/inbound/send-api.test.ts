@@ -695,11 +695,15 @@ describe("createWebSendApi", () => {
       maxSelections: 2,
     });
     expectFirstSendJid("1555@s.whatsapp.net");
-    expect(requireSendContent().poll).toEqual({
+    const sentPoll = requireRecord(requireSendContent().poll, "sent poll");
+    expect(sentPoll).toEqual({
       name: "Q?",
       values: ["a", "b"],
       selectableCount: 2,
+      messageSecret: expect.any(Buffer),
     });
+    // The poll secret is owned here so votes can be decrypted later.
+    expect((sentPoll.messageSecret as Buffer).byteLength).toBe(32);
     expect(res.messageId).toBe("msg-1");
     expect(recordChannelActivity).toHaveBeenCalledWith({
       channel: "whatsapp",
