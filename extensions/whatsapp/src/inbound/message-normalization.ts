@@ -8,6 +8,7 @@ import {
 import { isRecentOutboundMessage } from "./dedupe.js";
 import { hasInboundUserContent } from "./extract.js";
 import type { WhatsAppGroupMetadataCacheOwner } from "./group-metadata-cache.js";
+import { getWhatsAppPollVoteMeta } from "./poll-vote-inbound.js";
 import { isJidGroup } from "./runtime-api.js";
 import type { WhatsAppAttachedSocketSession } from "./socket-session.js";
 
@@ -107,6 +108,7 @@ export function createWhatsAppInboundMessageNormalizer(options: {
       isFromMe: Boolean(msg.key?.fromMe),
       messageTimestampMs,
       connectedAtMs: socketSession.connectedAtMs,
+      pairingReplyAllowed: !getWhatsAppPollVoteMeta(msg),
       verbose: options.verbose,
       sock: {
         sendMessage: (jid: string, content: AnyMessageContent) =>
