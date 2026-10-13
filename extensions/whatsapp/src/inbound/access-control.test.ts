@@ -289,12 +289,13 @@ describe("checkInboundAccessControl admission contract", () => {
 });
 
 describe("checkInboundAccessControl pairing grace", () => {
-  async function runPairingGraceCase(messageTimestampMs: number) {
+  async function runPairingGraceCase(messageTimestampMs: number, pairingReplyAllowed?: boolean) {
     const connectedAtMs = 1_000_000;
     return await checkAccess({
       messageTimestampMs,
       connectedAtMs,
       pairingGraceMs: 30_000,
+      ...(pairingReplyAllowed === undefined ? {} : { pairingReplyAllowed }),
     });
   }
 
@@ -308,6 +309,22 @@ describe("checkInboundAccessControl pairing grace", () => {
 
   it("sends pairing replies for live DMs", async () => {
     const result = await runPairingGraceCase(1_000_000 - 10_000);
+
+    expect(result.allowed).toBe(false);
+    expect(upsertPairingRequestMock).toHaveBeenCalled();
+    expect(sendMessageMock).toHaveBeenCalled();
+  });
+
+  it("never sends a pairing reply or creates a request when pairing replies are disallowed", async () => {
+    const result = await runPairingGraceCase(1_000_000 - 10_000, false);
+
+    expect(result.allowed).toBe(false);
+    expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps pairing replies when pairing replies are explicitly allowed", async () => {
+    const result = await runPairingGraceCase(1_000_000 - 10_000, true);
 
     expect(result.allowed).toBe(false);
     expect(upsertPairingRequestMock).toHaveBeenCalled();
