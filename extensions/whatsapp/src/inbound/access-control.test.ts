@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   readAllowFromStoreMock,
   sendMessageMock,
@@ -12,6 +12,11 @@ import {
 } from "./access-control.test-harness.js";
 import { normalizeTestWhatsAppMessage } from "./message-normalization.test-helper.js";
 import { createTestWebInboundMessage } from "./test-message.test-helper.js";
+
+const pollVoteMetaMock = vi.hoisted(() =>
+  vi.fn<(msg: object) => { pollMessageId: string } | undefined>(() => undefined),
+);
+vi.mock("./poll-vote-inbound.js", () => ({ getWhatsAppPollVoteMeta: pollVoteMetaMock }));
 
 setupAccessControlTestHarness();
 let authorize: typeof import("../inbound-policy.js").resolveWhatsAppCommandAuthorized;
@@ -87,6 +92,13 @@ describe("WhatsApp admission and command authorization", () => {
     } else {
       noPairing();
     }
+  });
+  it("never sends a pairing prompt for a live DM that is a derived poll vote", async () => {
+    pollVoteMetaMock.mockReturnValueOnce({ pollMessageId: "poll-1" });
+    expect(
+      await access({ messageTimestampMs: 1_000_000 - 10_000, connectedAtMs: 1_000_000 }),
+    ).toBeNull();
+    noPairing();
   });
   it("uses account-level dmPolicy instead of channel-level (#8736)", async () => {
     configure({
