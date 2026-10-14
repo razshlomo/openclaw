@@ -15,6 +15,7 @@ import {
 } from "../../identity.js";
 import { requireWhatsAppInboundAdmission } from "../../inbound/admission.js";
 import type { AdmittedWebInboundMessage } from "../../inbound/types.js";
+import type { WhatsAppPollTallyVoter } from "../../poll-vote-tally-store.js";
 
 export type GroupHistoryEntry = {
   sender: string;
@@ -110,4 +111,45 @@ export function resolveVisibleWhatsAppReplyContext(
     senderAllowed,
   });
   return visible ? { ...replyTo, body: visible.body ?? "" } : null;
+}
+
+function findJid(jids: readonly string[], suffix: string): string | null {
+  return jids.find((jid) => jid.endsWith(suffix)) ?? null;
+}
+
+/**
+ * Poll votes are other members' content, filtered like group history: under
+ * allowlist and allowlist_quote alike, a blocked voter is neither named nor counted.
+ */
+export function resolveVisibleWhatsAppPollVoters(params: {
+  authDir?: string;
+  isGroup: boolean;
+  voters: WhatsAppPollTallyVoter[];
+  mode: ContextVisibilityMode;
+  groupPolicy: "open" | "allowlist" | "disabled";
+  groupAllowFrom: string[];
+}): WhatsAppPollTallyVoter[] {
+  return filterSupplementalContextItems({
+    items: params.voters,
+    mode: params.mode,
+    kind: "history",
+    isSenderAllowed: (voter) => {
+      const jids = [voter.voterKey, ...voter.voterJids];
+      return resolveInboundSupplementalSenderAllowed({
+        isGroup: params.isGroup,
+        groupPolicy: params.groupPolicy,
+        allowFrom: params.groupAllowFrom,
+        isSenderAllowed: (allowFrom) =>
+          isWhatsAppSupplementalSenderAllowed({
+            allowFrom,
+            authDir: params.authDir,
+            sender: {
+              jid: findJid(jids, "@s.whatsapp.net"),
+              lid: findJid(jids, "@lid"),
+              e164: voter.e164 ?? null,
+            },
+          }),
+      });
+    },
+  }).items;
 }
