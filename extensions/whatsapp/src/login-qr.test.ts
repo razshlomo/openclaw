@@ -245,6 +245,7 @@ describe("login-qr", () => {
     await scanPendingQr(accountId, { force: true, beforeCredentialPersistence });
     expect(logoutWebMock).toHaveBeenCalledWith({
       authDir: expect.stringContaining(accountId),
+      accountId,
       isLegacyAuthDir: false,
       runtime: expect.anything(),
       beforeCredentialPersistence: expect.any(Function),
