@@ -162,6 +162,7 @@ export function isWhatsAppPollCreatorVisible(params: {
   authDir?: string;
   isGroup: boolean;
   creatorJids: readonly string[];
+  creatorE164?: string;
   mode: ContextVisibilityMode;
   groupPolicy: "open" | "allowlist" | "disabled";
   groupAllowFrom: string[];
@@ -184,7 +185,7 @@ export function isWhatsAppPollCreatorVisible(params: {
               sender: {
                 jid: findJid(jids, "@s.whatsapp.net"),
                 lid: findJid(jids, "@lid"),
-                e164: null,
+                e164: params.creatorE164 ?? null,
               },
             }),
         }),
