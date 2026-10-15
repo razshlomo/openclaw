@@ -7,6 +7,7 @@ import type {
   WAPresence,
 } from "baileys";
 import { resolveWhatsAppDocumentFileName } from "../document-filename.js";
+import type { WhatsAppSelfIdentity } from "../identity.js";
 import { addWhatsAppImagePreviewFields } from "../image-preview.js";
 import { isWhatsAppNewsletterJid } from "../normalize.js";
 import { recordWhatsAppPoll } from "../poll-vote-store.js";
@@ -44,9 +45,9 @@ type StructuredStickerSendOptions = {
 
 async function recordSentWhatsAppPoll(params: {
   accountId: string;
+  self: WhatsAppSelfIdentity | null | undefined;
   result: WhatsAppSendResult;
   chatJids: string[];
-  selfJids: readonly (string | null | undefined)[];
   question: string;
   options: string[];
   selectableCount: number;
@@ -56,11 +57,15 @@ async function recordSentWhatsAppPoll(params: {
   try {
     await recordWhatsAppPoll(
       {
-        accountId: params.accountId,
+        account: { accountId: params.accountId, self: params.self },
         pollMessageId: params.result.messageId,
         origin: "sent",
         chatJids: [...params.chatJids, ...params.result.keys.map((key) => key.remoteJid)],
-        creatorJids: [...params.selfJids, ...params.result.keys.map((key) => key.participant)],
+        creatorJids: [
+          params.self?.jid,
+          params.self?.lid,
+          ...params.result.keys.map((key) => key.participant),
+        ],
         question: params.question,
         secret: params.messageSecret,
         options: params.options,
@@ -96,8 +101,11 @@ export function createWebSendApi(params: {
   // proactive sends to LID-addressed contacts reach the recipient instead of
   // ending up in a sender-only ghost chat (#67378). Defaults to PN-only.
   authDir?: string;
-  /** The account's own PN/LID JIDs, recorded as the creator of polls it sends. */
-  selfJids?: () => readonly (string | null | undefined)[];
+  /**
+   * The linked phone: owns the polls this account sends and is their creator.
+   * Without it, sent polls are not recorded.
+   */
+  self?: () => WhatsAppSelfIdentity | null | undefined;
 }) {
   const resolveOutboundJid = (recipient: string): string =>
     params.authDir
@@ -254,9 +262,9 @@ export function createWebSendApi(params: {
       });
       await recordSentWhatsAppPoll({
         accountId: params.defaultAccountId,
+        self: params.self?.(),
         result,
         chatJids: [jid, toWhatsappJid(to)],
-        selfJids: params.selfJids?.() ?? [],
         question: poll.question,
         options: poll.options,
         selectableCount,
