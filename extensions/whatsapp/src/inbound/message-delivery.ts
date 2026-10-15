@@ -428,7 +428,7 @@ export function createWhatsAppMessageDeliveryCoordinator(options: WhatsAppMessag
     // Votes are counted here; only a direct-chat vote on our own poll continues, as a derived message.
     const pollVote = await resolveWhatsAppPollVote(rawMsg, {
       accountId: options.accountId,
-      selfJids: [self.jid, self.lid],
+      self,
       resolveInboundJid,
     });
     if (pollVote.kind === "completed") {
@@ -465,6 +465,7 @@ export function createWhatsAppMessageDeliveryCoordinator(options: WhatsAppMessag
     await recordWhatsAppInboundPoll({
       cfg: options.loadConfig?.() ?? options.cfg,
       accountId: options.accountId,
+      self,
       msg,
       group: inbound.group,
       remoteJid: inbound.remoteJid,
