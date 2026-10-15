@@ -153,3 +153,41 @@ export function resolveVisibleWhatsAppPollVoters(params: {
     },
   }).items;
 }
+
+/**
+ * A received poll is its creator's content: under allowlist and allowlist_quote
+ * alike, a blocked creator's question, options and name stay out of the context.
+ */
+export function isWhatsAppPollCreatorVisible(params: {
+  authDir?: string;
+  isGroup: boolean;
+  creatorJids: readonly string[];
+  mode: ContextVisibilityMode;
+  groupPolicy: "open" | "allowlist" | "disabled";
+  groupAllowFrom: string[];
+}): boolean {
+  const jids = params.creatorJids;
+  return (
+    filterSupplementalContextItems({
+      items: [jids],
+      mode: params.mode,
+      kind: "history",
+      isSenderAllowed: () =>
+        resolveInboundSupplementalSenderAllowed({
+          isGroup: params.isGroup,
+          groupPolicy: params.groupPolicy,
+          allowFrom: params.groupAllowFrom,
+          isSenderAllowed: (allowFrom) =>
+            isWhatsAppSupplementalSenderAllowed({
+              allowFrom,
+              authDir: params.authDir,
+              sender: {
+                jid: findJid(jids, "@s.whatsapp.net"),
+                lid: findJid(jids, "@lid"),
+                e164: null,
+              },
+            }),
+        }),
+    }).items.length > 0
+  );
+}
