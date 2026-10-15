@@ -1,5 +1,5 @@
 // Builds the stored poll results block for one chat, attached when the agent is woken there.
-import type { WhatsAppSelfIdentity } from "./identity.js";
+import { identitiesOverlap, type WhatsAppSelfIdentity } from "./identity.js";
 import type { AdmittedWebInboundMessage } from "./inbound/types.js";
 import {
   listWhatsAppChatPollIds,
@@ -54,9 +54,26 @@ function describeVoter(voter: WhatsAppPollTallyVoter): string {
   );
 }
 
-function describeCreator(record: WhatsAppPollRecord): string {
+/** A received poll the owner posted from the linked phone: neither the agent's nor a member's. */
+function isLinkedPhonePoll(
+  record: WhatsAppPollRecord,
+  self: WhatsAppSelfIdentity | null | undefined,
+): boolean {
+  return (
+    record.origin === "received" &&
+    [
+      ...record.creatorJids.map((jid) => ({ jid })),
+      ...(record.creatorE164 ? [{ e164: record.creatorE164 }] : []),
+    ].some((creator) => identitiesOverlap(creator, self))
+  );
+}
+
+function describeCreator(record: WhatsAppPollRecord, linkedPhone: boolean): string {
   if (record.origin === "sent") {
     return "assistant";
+  }
+  if (linkedPhone) {
+    return "linked phone";
   }
   return (
     record.creatorName ||
@@ -82,6 +99,7 @@ export type WhatsAppPollVisibility = {
 function buildPoll(
   pollMessageId: string,
   record: WhatsAppPollRecord,
+  linkedPhone: boolean,
   tally: WhatsAppPollTallyVoter[],
   filterVoters: WhatsAppPollVoterFilter | undefined,
 ): WhatsAppPollResultsPoll {
@@ -92,7 +110,7 @@ function buildPoll(
   return {
     poll_id: pollMessageId,
     question: record.question,
-    created_by: describeCreator(record),
+    created_by: describeCreator(record, linkedPhone),
     created_at: new Date(record.recordedAt).toISOString(),
     selectable_count: record.selectableCount,
     voters_total: voters.length,
@@ -174,8 +192,14 @@ export async function readWhatsAppPollResultsContext(params: {
         continue;
       }
       // A hidden creator takes the whole poll with them. A sent poll was read under the
-      // linked phone's own keys, so it is this assistant's and always shows.
-      if (record.origin === "received" && params.isCreatorVisible?.(record) === false) {
+      // linked phone's own keys, so it is this assistant's and always shows, as does
+      // the owner's own poll posted from that phone.
+      const linkedPhone = isLinkedPhonePoll(record, params.account.self);
+      if (
+        record.origin === "received" &&
+        !linkedPhone &&
+        params.isCreatorVisible?.(record) === false
+      ) {
         continue;
       }
       const tally = await readWhatsAppPollTally({
@@ -184,7 +208,7 @@ export async function readWhatsAppPollResultsContext(params: {
         pollMessageId,
         errors: "throw",
       });
-      polls.push(buildPoll(pollMessageId, record, tally ?? [], params.filterVoters));
+      polls.push(buildPoll(pollMessageId, record, linkedPhone, tally ?? [], params.filterVoters));
     }
     const fitted = fitPayload(polls);
     if (fitted.length === 0) {
