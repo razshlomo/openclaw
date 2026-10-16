@@ -15,7 +15,6 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   DEFAULT_E2E_BARE_IMAGE,
   DEFAULT_E2E_FUNCTIONAL_IMAGE,
-  DEFAULT_LIVE_RETRIES,
   DEFAULT_PARALLELISM,
   DEFAULT_PROFILE,
   DEFAULT_RESOURCE_LIMITS,
@@ -232,32 +231,16 @@ if (IS_MAIN) {
   }
 }
 
-function parsePositiveInt(raw: string | undefined, fallback: number, label: string) {
+function parseInteger(raw: string | undefined, fallback: number, label: string, min: 0 | 1 = 1) {
   if (raw === undefined || raw === "") {
     return fallback;
   }
   const text = raw.trim();
-  if (!/^\d+$/u.test(text)) {
-    throw new Error(`${label} must be a positive integer. Got: ${JSON.stringify(raw)}`);
-  }
   const parsed = Number(text);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error(`${label} must be a positive integer. Got: ${JSON.stringify(raw)}`);
-  }
-  return parsed;
-}
-
-function parseNonNegativeInt(raw: string | undefined, fallback: number, label: string) {
-  if (raw === undefined || raw === "") {
-    return fallback;
-  }
-  const text = raw.trim();
-  if (!/^\d+$/u.test(text)) {
-    throw new Error(`${label} must be a non-negative integer. Got: ${JSON.stringify(raw)}`);
-  }
-  const parsed = Number(text);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`${label} must be a non-negative integer. Got: ${JSON.stringify(raw)}`);
+  if (!/^\d+$/u.test(text) || !Number.isSafeInteger(parsed) || parsed < min) {
+    throw new Error(
+      `${label} must be a ${min === 0 ? "non-negative" : "positive"} integer. Got: ${JSON.stringify(raw)}`,
+    );
   }
   return parsed;
 }
@@ -309,14 +292,14 @@ function resourceLimitsSummary(resourceLimits: Record<string, number>) {
     .join(" ");
 }
 
-export function describeDockerSchedulerLimits(parallelism: number, options: SchedulerLimits) {
+function describeDockerSchedulerLimits(parallelism: number, options: SchedulerLimits) {
   return `parallelism=${parallelism} weightLimit=${options.weightLimit} resources=${resourceLimitsSummary(
     options.resourceLimits,
   )}`;
 }
 
 function parseSchedulerOptions(env: NodeJS.ProcessEnv, parallelism: number) {
-  const weightLimit = parsePositiveInt(
+  const weightLimit = parseInteger(
     env.OPENCLAW_DOCKER_ALL_WEIGHT_LIMIT,
     parallelism,
     "OPENCLAW_DOCKER_ALL_WEIGHT_LIMIT",
@@ -324,11 +307,7 @@ function parseSchedulerOptions(env: NodeJS.ProcessEnv, parallelism: number) {
   const resourceLimits: Record<string, number> = {};
   for (const [resource, fallback] of Object.entries(DEFAULT_RESOURCE_LIMITS)) {
     const envName = `OPENCLAW_DOCKER_ALL_${resource.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_LIMIT`;
-    resourceLimits[resource] = parsePositiveInt(
-      env[envName],
-      Math.min(parallelism, fallback),
-      envName,
-    );
+    resourceLimits[resource] = parseInteger(env[envName], Math.min(parallelism, fallback), envName);
   }
   return {
     resourceLimits,
@@ -884,8 +863,7 @@ async function runPhase<T>(
   let status: "failed" | "passed" = "passed";
   let errorMessage: string | undefined;
   try {
-    const result = await fn();
-    return result;
+    return await fn();
   } catch (error) {
     status = "failed";
     errorMessage = error instanceof Error ? error.message : String(error);
@@ -1471,7 +1449,10 @@ async function prepareDockerCandidate(
   }
 }
 
-function e2eImageForLane(poolLane: DockerE2eLane, baseEnv: NodeJS.ProcessEnv) {
+function e2eImageForLane(
+  poolLane: Pick<DockerE2eLane, "e2eImageKind">,
+  baseEnv: NodeJS.ProcessEnv,
+) {
   if (poolLane.e2eImageKind === "bare") {
     return baseEnv.OPENCLAW_DOCKER_E2E_BARE_IMAGE;
   }
@@ -1537,7 +1518,6 @@ async function runLane(
         `==> [${name}] cache dir: ${env.OPENCLAW_DOCKER_CACHE_HOME_DIR}`,
         `==> [${name}] timeout: ${timeoutMs}ms`,
         `==> [${name}] no output timeout: ${noOutputTimeoutMs ?? 0}ms`,
-        `==> [${name}] retries: ${lane.retries ?? 0}`,
         `==> [${name}] e2e image kind: ${lane.e2eImageKind ?? "none"}`,
         `==> [${name}] e2e image: ${env.OPENCLAW_DOCKER_E2E_IMAGE ?? ""}`,
         `==> [${name}] trusted harness: ${HARNESS_ROOT_DIR}`,
@@ -1549,34 +1529,15 @@ async function runLane(
   console.log(`==> [${name}] start`);
   const startedAt = Date.now();
   const startedAtIso = new Date(startedAt).toISOString();
-  let result: ShellCommandResult;
-  const attempts: ReturnType<typeof laneAttempt>[] = [];
-  const maxAttempts = 1 + Math.max(0, lane.retries ?? 0);
-  for (let attempt = 1; ; attempt += 1) {
-    const attemptStartedAt = Date.now();
-    if (attempt > 1) {
-      await fs.promises
-        .appendFile(logFile, `\n==> [${name}] retry attempt ${attempt}\n`)
-        .catch(recordPublicationFailure);
-      console.log(`==> [${name}] retry ${attempt}/${maxAttempts}`);
-    }
-    result = await runShellCommand({
-      command,
-      env,
-      label: name,
-      logFile,
-      timeoutMs,
-      noOutputTimeoutMs,
-    });
-    attempts.push(laneAttempt(attempt, attemptStartedAt, result));
-    if (activeChildrenShutdownPromise || result.status === 0 || attempt >= maxAttempts) {
-      break;
-    }
-    // An exhausted lane deadline alone does not diagnose a transient failure.
-    if (!(await laneLogMatchesRetryPattern(logFile, lane.retryPatterns))) {
-      break;
-    }
-  }
+  const result = await runShellCommand({
+    command,
+    env,
+    label: name,
+    logFile,
+    timeoutMs,
+    noOutputTimeoutMs,
+  });
+  const attempts = [laneAttempt(1, startedAt, result)];
   const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   if (result.status === 0) {
     console.log(`==> [${name}] pass ${elapsedSeconds}s`);
@@ -1660,10 +1621,6 @@ async function runLanePool(
     lastLaneStartAt = Date.now();
   }
 
-  function canStartLane(candidate: DockerE2eLane) {
-    return canStartSchedulerLane(candidate, active, parallelism, options);
-  }
-
   function reserve(candidate: DockerE2eLane) {
     const weight = laneWeight(candidate);
     active.count += 1;
@@ -1739,7 +1696,7 @@ async function runLanePool(
           if (!candidate) {
             break;
           }
-          if (!canStartLane(candidate)) {
+          if (!canStartSchedulerLane(candidate, active, parallelism, options)) {
             index += 1;
             continue;
           }
@@ -1814,14 +1771,6 @@ export async function tailFile(file: string, lines: number, maxBytes = LOG_TAIL_
   }
   const tail = content.split(/\r?\n/).slice(-lines).join("\n");
   return tail.trimEnd();
-}
-
-async function laneLogMatchesRetryPattern(logFile: string, patterns: RegExp[]) {
-  if (!patterns || patterns.length === 0) {
-    return false;
-  }
-  const tail = await tailFile(logFile, 160);
-  return patterns.some((pattern) => pattern.test(tail));
 }
 
 async function printFailureSummary(failures: LaneResult[], tailLines: number) {
@@ -2034,37 +1983,39 @@ process.on("SIGTERM", () => {
 async function main() {
   const runStartedAt = new Date().toISOString();
   const phases: Array<Record<string, unknown>> = [];
-  const parallelism = parsePositiveInt(
+  const parallelism = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_PARALLELISM,
     DEFAULT_PARALLELISM,
     "OPENCLAW_DOCKER_ALL_PARALLELISM",
   );
-  const tailParallelism = parsePositiveInt(
+  const tailParallelism = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_TAIL_PARALLELISM,
     Math.min(parallelism, DEFAULT_TAIL_PARALLELISM),
     "OPENCLAW_DOCKER_ALL_TAIL_PARALLELISM",
   );
-  const tailLines = parsePositiveInt(
+  const tailLines = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_FAILURE_TAIL_LINES,
     DEFAULT_FAILURE_TAIL_LINES,
     "OPENCLAW_DOCKER_ALL_FAILURE_TAIL_LINES",
   );
-  const laneTimeoutMs = parsePositiveInt(
+  const laneTimeoutMs = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_LANE_TIMEOUT_MS,
     DEFAULT_LANE_TIMEOUT_MS,
     "OPENCLAW_DOCKER_ALL_LANE_TIMEOUT_MS",
   );
-  const laneStartStaggerMs = parseNonNegativeInt(
+  const laneStartStaggerMs = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_START_STAGGER_MS,
     DEFAULT_LANE_START_STAGGER_MS,
     "OPENCLAW_DOCKER_ALL_START_STAGGER_MS",
+    0,
   );
-  const statusIntervalMs = parseNonNegativeInt(
+  const statusIntervalMs = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_STATUS_INTERVAL_MS,
     DEFAULT_STATUS_INTERVAL_MS,
     "OPENCLAW_DOCKER_ALL_STATUS_INTERVAL_MS",
+    0,
   );
-  const preflightRunTimeoutMs = parsePositiveInt(
+  const preflightRunTimeoutMs = parseInteger(
     process.env.OPENCLAW_DOCKER_ALL_PREFLIGHT_RUN_TIMEOUT_MS,
     DEFAULT_PREFLIGHT_RUN_TIMEOUT_MS,
     "OPENCLAW_DOCKER_ALL_PREFLIGHT_RUN_TIMEOUT_MS",
@@ -2098,11 +2049,6 @@ async function main() {
     throw new Error("OPENCLAW_DOCKER_ALL_LANES must include at least one lane name");
   }
   const liveMode = parseLiveMode(process.env.OPENCLAW_DOCKER_ALL_LIVE_MODE);
-  const liveRetries = parseNonNegativeInt(
-    process.env.OPENCLAW_DOCKER_ALL_LIVE_RETRIES,
-    DEFAULT_LIVE_RETRIES,
-    "OPENCLAW_DOCKER_ALL_LIVE_RETRIES",
-  );
   const timingsFile = path.resolve(
     process.env.OPENCLAW_DOCKER_ALL_TIMINGS_FILE || DEFAULT_TIMINGS_FILE,
   );
@@ -2142,7 +2088,6 @@ async function main() {
     resolveDockerE2ePlan({
       includeOpenWebUI,
       liveMode,
-      liveRetries,
       orderLanes,
       planReleaseAll: planJson && planReleaseAll,
       profile,
@@ -2244,7 +2189,6 @@ async function main() {
   console.log(`==> Tail parallelism: ${tailParallelism}`);
   console.log(`==> Lane timeout: ${laneTimeoutMs}ms`);
   console.log(`==> Live mode: ${liveMode}`);
-  console.log(`==> Live retries: ${liveRetries}`);
   console.log(`==> Lane start stagger: ${laneStartStaggerMs}ms`);
   console.log(`==> Status interval: ${statusIntervalMs}ms`);
   console.log(`==> Fail fast: ${failFast ? "yes" : "no"}`);
@@ -2349,30 +2293,19 @@ async function main() {
         phases,
       });
     }
-    if (lanesNeedE2eImageKind(scheduledLanes, "bare")) {
+    for (const imageKind of ["bare", "functional"] as const) {
+      if (!lanesNeedE2eImageKind(scheduledLanes, imageKind)) {
+        continue;
+      }
+      const image = e2eImageForLane({ e2eImageKind: imageKind }, baseEnv);
       buildEntries.push({
         command: prepareHarnessCommand("pnpm test:docker:e2e-build", baseEnv),
         env: {
-          OPENCLAW_DOCKER_E2E_IMAGE: baseEnv.OPENCLAW_DOCKER_E2E_BARE_IMAGE,
-          OPENCLAW_DOCKER_E2E_TARGET: "bare",
+          OPENCLAW_DOCKER_E2E_IMAGE: image,
+          OPENCLAW_DOCKER_E2E_TARGET: imageKind,
         },
-        label: `shared bare Docker E2E image once: ${baseEnv.OPENCLAW_DOCKER_E2E_BARE_IMAGE}`,
-        phaseDetails: { image: baseEnv.OPENCLAW_DOCKER_E2E_BARE_IMAGE, imageKind: "bare" },
-        phases,
-      });
-    }
-    if (lanesNeedE2eImageKind(scheduledLanes, "functional")) {
-      buildEntries.push({
-        command: prepareHarnessCommand("pnpm test:docker:e2e-build", baseEnv),
-        env: {
-          OPENCLAW_DOCKER_E2E_IMAGE: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
-          OPENCLAW_DOCKER_E2E_TARGET: "functional",
-        },
-        label: `shared functional Docker E2E image once: ${baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE}`,
-        phaseDetails: {
-          image: baseEnv.OPENCLAW_DOCKER_E2E_FUNCTIONAL_IMAGE,
-          imageKind: "functional",
-        },
+        label: `shared ${imageKind} Docker E2E image once: ${image}`,
+        phaseDetails: { image, imageKind },
         phases,
       });
     }

@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   save: vi.fn(),
 }));
 vi.mock("../../../state/openclaw-state-worker-context.js", () => ({
+  captureOpenClawStateReadContext: mocks.context,
   captureOpenClawStateWorkerContext: mocks.context,
 }));
 vi.mock("../../../state/openclaw-state-worker-store.js", () => ({
@@ -62,6 +63,7 @@ function run(): SubagentRunRecord {
 function context(): OpenClawStateWorkerContext {
   return {
     admission: {
+      coordinationKey: "synthetic",
       databasePath: "/synthetic/state.sqlite",
       identity: { key: "synthetic", canonicalPath: "/synthetic/state.sqlite" },
       assertCurrent: vi.fn(),

@@ -82,10 +82,6 @@ export async function checkInboundAccessControl(params: {
       typeof params.messageTimestampMs === "number" &&
       params.messageTimestampMs < params.connectedAtMs - pairingGraceMs);
 
-  // Group policy filtering:
-  // - "open": groups bypass allowFrom, only mention-gating applies
-  // - "disabled": block all group messages entirely
-  // - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
   warnMissingProviderGroupPolicyFallbackOnce({
     providerMissingFallbackApplied: policy.providerMissingFallbackApplied,
     providerKey: "whatsapp",
@@ -127,7 +123,6 @@ export async function checkInboundAccessControl(params: {
     return blockedInboundAccess(policy);
   }
 
-  // DM access control (secure defaults): "pairing" (default) / "allowlist" / "open" / "disabled".
   if (!params.group) {
     if (
       params.isFromMe &&

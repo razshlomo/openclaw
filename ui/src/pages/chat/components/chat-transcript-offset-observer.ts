@@ -122,6 +122,9 @@ type OffsetOwner = {
   cancelScroll(): void;
   requestUpdate(): void;
   onReaderScroll(towardEnd?: boolean): void;
+  onComposerInput(): void;
+  onComposerLayout(changed: boolean): void;
+  cancelComposerResize(): void;
 };
 
 /** Observe native offsets and input with the transcript's touch and command lifecycle. */
@@ -165,6 +168,13 @@ export function observeTranscriptOffset(
   owner.state.recordProgrammaticScroll = recordProgrammaticScroll;
   const stopCorrections = element
     ? subscribeTranscriptScroll(element, (observation) => {
+        if (observation.type === "composer-input") {
+          owner.onComposerInput();
+        } else if (observation.type === "composer-layout") {
+          owner.onComposerLayout(observation.changed);
+        } else if (observation.type === "before-resize") {
+          owner.onComposerLayout(true);
+        }
         if (observation.type === "resize" && observation.scrollCorrection) {
           const { before, after } = observation.scrollCorrection;
           recordProgrammaticScroll(before, after, true);
@@ -202,14 +212,10 @@ export function observeTranscriptOffset(
       touching: owner.state.touching,
       programmatic,
     });
-    const changed = offset !== instance.scrollOffset;
+    // Row range changes notify through the virtualizer; the position rail
+    // follows offset observations itself, so scrolling within the rendered
+    // rows does not re-render the pane.
     callback(offset, scrolling);
-    // Range notifications are memoized: the viewport midpoint can cross
-    // a rail landmark without changing the visible rows. Lit coalesces
-    // this request with the virtualizer's own update when both fire.
-    if (changed) {
-      owner.requestUpdate();
-    }
   };
   const syncOffset = () => {
     if (!element || element !== owner.getScrollElement() || instance.scrollElement !== element) {
@@ -241,7 +247,8 @@ export function observeTranscriptOffset(
     owner.requestUpdate();
   };
   const finishScroll = () => {
-    if (!owner.state.touching) {
+    // Only touch scrolling holds history; wheel and trackpad settles need no render.
+    if (!owner.state.touching && owner.state.touchScrolling) {
       owner.state.touchScrolling = false;
       owner.requestUpdate();
     }
@@ -267,6 +274,7 @@ export function observeTranscriptOffset(
       owner.state.touching = contactIds.size > 0;
       touchY = localTouchY(event);
     }
+    owner.cancelComposerResize();
     owner.state.pendingInteractionAnchor = null;
     owner.state.maintenanceScrollOffset = null;
     // Native scrolling may precede input delivery. Attribute the gesture before
@@ -299,6 +307,10 @@ export function observeTranscriptOffset(
     touchY = nextY;
     publishInput(event);
   };
+  // Commit editor-induced geometry before Lit's bubble listener classifies
+  // the native offset. Only the actual correction carries maintenance provenance.
+  const commitComposerResize = () => owner.onComposerLayout(true);
+  element?.addEventListener("scroll", commitComposerResize, { capture: true, passive: true });
   element?.addEventListener("touchmove", moveTouch, { passive: true });
   for (const type of ["wheel", "touchstart", "keydown", "pointerdown"]) {
     element?.addEventListener(type, interrupt, { passive: true });
@@ -351,6 +363,7 @@ export function observeTranscriptOffset(
     contactIds.clear();
     owner.state.touching = false;
     owner.state.touchScrolling = false;
+    element?.removeEventListener("scroll", commitComposerResize, true);
     element?.removeEventListener("scrollend", finishScroll);
     element?.removeEventListener("touchend", finishTouch);
     element?.removeEventListener("touchmove", moveTouch);

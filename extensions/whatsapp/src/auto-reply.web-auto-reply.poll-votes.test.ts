@@ -3,9 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { withTempHome } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildMentionConfig } from "./auto-reply/mentions.js";
 import type { GroupHistoryEntry } from "./auto-reply/monitor/inbound-context.js";
 import { createWebOnMessageHandler } from "./auto-reply/monitor/on-message.js";
 import {
@@ -57,6 +60,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  clearRuntimeConfigSnapshot();
   await pollState.cleanup();
 });
 
@@ -88,6 +92,8 @@ async function withPollHome(run: (cfg: OpenClawConfig) => Promise<void>) {
       const cfg = makeCfg(root);
       await fs.writeFile(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify(cfg));
       mockLoadConfig.mockReturnValue(cfg);
+      // Group turns read recent transcript text through the prepared runtime config.
+      setRuntimeConfigSnapshot(cfg);
       await run(cfg);
     },
     {
@@ -114,8 +120,6 @@ async function startAgent(cfg: OpenClawConfig, accountId = DEFAULT_ACCOUNT_ID) {
     backgroundTasks,
     replyResolver: replyResolver as never,
     replyLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
-    baseMentionConfig: buildMentionConfig(cfg),
-    account: { accountId },
     buildContext: ((params: Parameters<typeof buildChannelInboundEventContext>[0]) => {
       const built = buildChannelInboundEventContext(params);
       contexts.push(built as ReplyContext);

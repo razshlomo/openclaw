@@ -13,6 +13,10 @@ import {
   findOpenClawAgentDatabaseIdentity,
   readOpenClawAgentDatabaseIdentity,
 } from "./openclaw-agent-db-identity.js";
+import {
+  matchesAgentDatabaseReadCandidatePath,
+  type OpenClawAgentDatabaseReadCandidateResource,
+} from "./openclaw-agent-db-resources.js";
 
 export type OpenClawAgentDatabaseValidation = {
   agentId: string;
@@ -324,19 +328,33 @@ export function setOpenClawAgentDatabaseValidation(
   return validation;
 }
 
-export function invalidateOpenClawAgentDatabaseValidation(pathname: string): void {
+export function invalidateOpenClawAgentDatabaseValidation(
+  pathname: string,
+  identity = validatedPaths.get(path.resolve(pathname))?.validation?.identity,
+): void {
   const resolved = path.resolve(pathname);
-  const validation = validatedPaths.get(resolved)?.validation;
-  if (validation) {
-    Atomics.store(new Int32Array(validation.valid), 0, 0);
+  const paths = new Set([resolved]);
+  if (identity) {
+    for (const [candidate, entry] of validatedPaths) {
+      if (entry.validation?.identity === identity) {
+        paths.add(candidate);
+      }
+    }
   }
-  // Replace even an empty/revoked entry so an in-flight native handoff cannot revive it.
-  validatedPaths.set(resolved, {
-    agentId: validatedPaths.get(resolved)?.agentId,
-    validation,
-    integrityVerified: false,
-    revoked: true,
-  });
+  for (const candidate of paths) {
+    const entry = validatedPaths.get(candidate);
+    const validation = entry?.validation;
+    if (validation) {
+      Atomics.store(new Int32Array(validation.valid), 0, 0);
+    }
+    // Replace even an empty/revoked entry so an in-flight handoff cannot revive it.
+    validatedPaths.set(candidate, {
+      agentId: entry?.agentId,
+      validation,
+      integrityVerified: false,
+      revoked: true,
+    });
+  }
 }
 
 export function invalidateOpenClawAgentDatabaseValidationsForAgent(
@@ -357,6 +375,19 @@ export function clearOpenClawAgentDatabaseValidationCache(rootPath?: string): vo
   for (const pathname of validatedPaths.keys()) {
     if (rootPath === undefined || isPathInside(rootPath, pathname)) {
       invalidateOpenClawAgentDatabaseValidation(pathname);
+      validatedPaths.delete(pathname);
+    }
+  }
+}
+
+/** Reader cleanup releases local metadata without revoking its parent's shared proof. */
+export function releaseOpenClawAgentDatabaseReadValidation(
+  candidates: readonly Pick<OpenClawAgentDatabaseReadCandidateResource, "path" | "scope">[],
+): void {
+  for (const pathname of validatedPaths.keys()) {
+    if (
+      candidates.some((candidate) => matchesAgentDatabaseReadCandidatePath(candidate, pathname))
+    ) {
       validatedPaths.delete(pathname);
     }
   }

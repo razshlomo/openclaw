@@ -1,18 +1,13 @@
-// Whatsapp API module exposes the plugin public contract.
 import { randomBytes } from "node:crypto";
-import type {
-  AnyMessageContent,
-  MiscMessageGenerationOptions,
-  WAMessage,
-  WAPresence,
-} from "baileys";
+import type { AnyMessageContent, WAMessage } from "baileys";
 import { resolveWhatsAppDocumentFileName } from "../document-filename.js";
 import type { WhatsAppSelfIdentity } from "../identity.js";
 import { addWhatsAppImagePreviewFields } from "../image-preview.js";
-import { isWhatsAppNewsletterJid } from "../normalize.js";
+import { isWhatsAppNewsletterJid } from "../normalize-target.js";
 import { recordWhatsAppPoll } from "../poll-vote-store.js";
 import { buildQuotedMessageOptions } from "../quoted-message.js";
-import { toWhatsappJid, toWhatsappJidWithLid } from "../text-runtime.js";
+import type { WhatsAppSocketOperationAdapter } from "../socket-timing.js";
+import { toWhatsappJid, toWhatsappJidWithLid } from "../targets-runtime.js";
 import {
   addWhatsAppOutboundMentionsToContent,
   type WhatsAppOutboundMentionResolution,
@@ -78,19 +73,8 @@ async function recordSentWhatsAppPoll(params: {
   }
 }
 
-function supportsForcedDocumentMediaType(mediaType: string): boolean {
-  return mediaType.startsWith("image/") || mediaType.startsWith("video/");
-}
-
 export function createWebSendApi(params: {
-  sock: {
-    sendMessage: (
-      jid: string,
-      content: AnyMessageContent,
-      options?: MiscMessageGenerationOptions,
-    ) => Promise<WAMessage | undefined>;
-    sendPresenceUpdate: (presence: WAPresence, jid?: string) => Promise<unknown>;
-  };
+  sock: WhatsAppSocketOperationAdapter;
   defaultAccountId: string;
   resolveOutboundMentions?: (params: {
     jid: string;
@@ -172,18 +156,7 @@ export function createWebSendApi(params: {
         ? { text, mentionedJids: [] }
         : await resolveMentions(jid, text);
       if (mediaBuffer && mediaType) {
-        if (sendOptions?.asDocument === true && supportsForcedDocumentMediaType(mediaType)) {
-          const fileName = resolveWhatsAppDocumentFileName({
-            fileName: sendOptions?.fileName,
-            mimetype: mediaType,
-          });
-          payload = {
-            document: mediaBuffer,
-            fileName,
-            caption: resolvedPayloadText.text || undefined,
-            mimetype: mediaType,
-          };
-        } else if (mediaType.startsWith("image/")) {
+        if (mediaType.startsWith("image/") && sendOptions?.asDocument !== true) {
           payload = await addWhatsAppImagePreviewFields({
             image: mediaBuffer,
             caption: resolvedPayloadText.text || undefined,
@@ -191,7 +164,7 @@ export function createWebSendApi(params: {
           });
         } else if (mediaType.startsWith("audio/")) {
           payload = { audio: mediaBuffer, ptt: true, mimetype: mediaType };
-        } else if (mediaType.startsWith("video/")) {
+        } else if (mediaType.startsWith("video/") && sendOptions?.asDocument !== true) {
           const gifPlayback = sendOptions?.gifPlayback;
           payload = {
             video: mediaBuffer,
@@ -216,15 +189,10 @@ export function createWebSendApi(params: {
       }
       payload = addWhatsAppOutboundMentionsToContent(payload, resolvedPayloadText.mentionedJids);
       const quotedOpts = buildQuotedMessageOptions({
+        ...sendOptions?.quotedMessageKey,
         messageId: sendOptions?.quotedMessageKey?.id,
-        remoteJid: sendOptions?.quotedMessageKey?.remoteJid,
-        fromMe: sendOptions?.quotedMessageKey?.fromMe,
-        participant: sendOptions?.quotedMessageKey?.participant,
         destinationJid: jid,
         requestedJid: toWhatsappJid(to),
-        lookupTargetJid: sendOptions?.quotedMessageKey?.lookupTargetJid,
-        messageText: sendOptions?.quotedMessageKey?.messageText,
-        media: sendOptions?.quotedMessageKey?.media,
       });
       const kind = mediaBuffer ? "media" : "text";
       const accountId = sendOptions?.accountId ?? params.defaultAccountId;
@@ -288,7 +256,7 @@ export function createWebSendApi(params: {
               },
             ],
           },
-        } as AnyMessageContent,
+        },
         "contact",
       );
     },
@@ -305,7 +273,7 @@ export function createWebSendApi(params: {
             name: location.name,
             address: location.address,
           },
-        } as AnyMessageContent,
+        },
         "location",
       );
     },
@@ -319,7 +287,7 @@ export function createWebSendApi(params: {
         {
           sticker: stickerBuffer,
           mimetype: options?.mimetype ?? "image/webp",
-        } as AnyMessageContent,
+        },
         "sticker",
       );
     },
@@ -343,7 +311,7 @@ export function createWebSendApi(params: {
             participant: participant ? toWhatsappJid(participant) : undefined,
           },
         },
-      } as AnyMessageContent);
+      });
       return normalizeWhatsAppSendResult(result, "reaction");
     },
     sendComposingTo: async (to: string): Promise<void> => {

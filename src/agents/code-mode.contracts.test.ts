@@ -1,7 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { Type } from "typebox";
-import ts from "typescript";
 import { afterEach, expect, it, vi } from "vitest";
+import { typeCheckSources } from "../../test/helpers/typescript.js";
 import { createMcpApiVirtualFiles } from "./code-mode-mcp-api.js";
 import { applyCodeModeCatalog } from "./code-mode.js";
 import {
@@ -124,6 +124,36 @@ it("allows omitted native empty inputs but preserves required fields", async () 
   expect(required.execute).toHaveBeenCalledOnce();
 });
 
+it("keeps an explicit tool error's text when its details carry no message", async () => {
+  const h = createCodeModeHarness();
+  const reason = "Start the Gateway with visitor-access enabled before managing visitors.";
+  const errorTool = (name: string, text: string, details: unknown) =>
+    pluginToolWithExecute(name, "Fail", async () => ({
+      content: [{ type: "text" as const, text }],
+      details,
+      isError: true,
+    }));
+  const tools = [
+    errorTool("flag_only", reason, { error: true }),
+    errorTool("no_details", "Gateway unavailable.", undefined),
+    errorTool("blank_message", "Visitor store is locked.", { error: true, message: " " }),
+    errorTool("structured", "Rendered failure.", { status: "failed", error: "structured" }),
+  ];
+  applyCodeModeCatalog({ ...h.ctx, tools: [...h.tools, ...tools] });
+  const result = resultDetails(
+    await expectDefined(h.tools[0], "exec").execute("tool-error-text", {
+      code: "return [await flag_only(), await no_details(), await blank_message(), await structured()];",
+    }),
+  );
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(result.value).toEqual([
+    { error: true, message: reason },
+    { message: "Gateway unavailable." },
+    { error: true, message: "Visitor store is locked." },
+    { status: "failed", error: "structured" },
+  ]);
+});
+
 it("merges actual root and multiple server files without skipping declaration errors", () => {
   const files = createMcpApiVirtualFiles(
     ["alpha", "beta", "index"].map((identifier) => ({
@@ -134,23 +164,5 @@ it("merges actual root and multiple server files without skipping declaration er
   );
   const texts = new Map(files.map((file) => ["/" + file.path, file.content]));
   texts.set("/consumer.ts", "MCP.$api(); MCP.alpha.$api(); MCP.beta.$api(); MCP.index.$api();");
-  const options = {
-    noEmit: true,
-    strict: true,
-    types: [],
-    target: ts.ScriptTarget.ESNext,
-    skipLibCheck: false,
-  };
-  const host = ts.createCompilerHost(options);
-  const original = host.getSourceFile.bind(host);
-  host.getSourceFile = (name, ...args) =>
-    texts.has(name)
-      ? ts.createSourceFile(name, texts.get(name)!, args[0], true)
-      : original(name, ...args);
-  const program = ts.createProgram([...texts.keys()], options, host);
-  expect(
-    ts
-      .getPreEmitDiagnostics(program)
-      .map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
-  ).toEqual([]);
+  expect(typeCheckSources(Object.fromEntries(texts))).toEqual([]);
 });

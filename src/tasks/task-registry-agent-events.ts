@@ -7,7 +7,6 @@ import {
   deferSqlitePostCommitPublication,
   stageSqliteTransactionState,
 } from "../infra/sqlite-post-commit.js";
-import type { SqliteWorkerNativeSettlementOwner } from "../infra/sqlite-worker-operation-settlement.js";
 import { runWithGatewayDetachedWorkContinuation } from "../process/gateway-work-admission.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { restoreAgentSchemaInspectionError } from "../state/openclaw-agent-schema-inspection-response.js";
@@ -17,19 +16,23 @@ import {
   registerOpenClawStateDatabaseAsyncResource,
 } from "../state/openclaw-state-db-cache.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
-import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { hasAuthoritativeTaskBacking } from "./task-backing-authority.js";
 import {
   finishTaskMutation,
   retainTaskMutationFlowEffects,
 } from "./task-executor-mutation-effects.async.js";
 import { getTaskFlowRegistryStore } from "./task-flow-registry.store.js";
-import { clearTaskActivity, flushTaskActivity } from "./task-registry-activity.js";
+import { flushTaskActivity } from "./task-registry-activity.js";
 import { recoverTaskAgentEventPublication } from "./task-registry-agent-event-commit.js";
+import { publishTaskAgentEventDelivery } from "./task-registry-agent-event-delivery.js";
 import {
-  publishTaskAgentEventDelivery,
-  type TaskAgentEventDelivery,
-} from "./task-registry-agent-event-delivery.js";
+  clearTaskAgentEventLineage,
+  publishTaskAgentEventLineage,
+} from "./task-registry-agent-event-lineage.js";
+import {
+  captureTaskAgentEventSource,
+  sameTaskAgentEventSource,
+} from "./task-registry-agent-event-source.js";
 import type { TaskAgentEventTarget } from "./task-registry-agent-event-target.js";
 import {
   captureTaskAgentEventChange,
@@ -38,10 +41,9 @@ import {
   matchesTaskAgentEventTarget,
   prepareTaskAgentEventUpdate,
   TASK_ACTIVITY_LIVENESS_WRITE_MS,
-  type TaskAgentEventInput,
-  type TaskAgentEventPublication,
   type TaskAgentEventReceipt,
 } from "./task-registry-agent-event.operation.js";
+import type { PendingTaskAgentEvent as PendingEvent } from "./task-registry-agent-events.types.js";
 import { updateTaskWithPublication } from "./task-registry-mutation.js";
 import {
   captureTaskPersistenceReceipt,
@@ -49,42 +51,15 @@ import {
   isEquivalentTaskRecord,
 } from "./task-registry-records.js";
 import {
+  clearTaskActivity,
   runTaskRegistryWorkerMutation,
   invalidateTaskRegistryProjection,
   taskFlowSyncOwner,
   taskRegistryLog,
   tasks,
 } from "./task-registry-state.js";
-import { getTaskRegistryStore, type TaskRegistryStore } from "./task-registry.store.js";
-import type { TaskRecord } from "./task-registry.types.js";
+import { getTaskRegistryStore } from "./task-registry.store.js";
 import { getTaskRunOwner } from "./task-run-owner.js";
-
-type EventSource = {
-  runId: string;
-  lifecycleGeneration: string;
-  runContext: ReturnType<typeof getAgentRunContext>;
-  subagent: ReturnType<typeof subagentRuns.get>;
-  subagentGeneration: number | undefined;
-};
-type PendingEvent = {
-  input: TaskAgentEventInput;
-  source: EventSource;
-  context: OpenClawStateWorkerContext;
-  store: TaskRegistryStore;
-  flowStore: ReturnType<typeof getTaskFlowRegistryStore>;
-  phase:
-    | { kind: "waiting" | "worker" | "native" | "consumed" }
-    | { kind: "granted"; owner: SqliteWorkerNativeSettlementOwner };
-  native: ReturnType<typeof createDeferredCore<TaskAgentEventReceipt | null>>;
-  completion: ReturnType<typeof createDeferredCore<void>>;
-  claimed: Error;
-  receipt?: TaskAgentEventReceipt | null;
-  publication?: TaskAgentEventPublication;
-  delivery?: TaskAgentEventDelivery;
-  commitFacts?: unknown;
-  committedTarget?: TaskAgentEventInput["expectedTask"];
-  lineageResident?: TaskRecord;
-};
 
 const pendingEvents = new Set<PendingEvent>();
 const pendingByTask = new Map<string, Set<PendingEvent>>();
@@ -100,6 +75,7 @@ registerOpenClawStateDatabaseAsyncResource({
     ) {
       await Promise.allSettled(drains);
     }
+    clearTaskAgentEventLineage(identity?.key);
   },
 });
 
@@ -141,11 +117,17 @@ function removePendingTaskBatch(pending: PendingEvent): void {
 }
 
 function forget(pending: PendingEvent): void {
+  publishTaskAgentEventLineage(pending);
   pendingEvents.delete(pending);
   removePendingTaskBatch(pending);
 }
 
 function settleNativeEvent(pending: PendingEvent, receipt: TaskAgentEventReceipt | null): void {
+  const committed = () => {
+    pending.receipt = receipt;
+    publishTaskAgentEventLineage(pending);
+    pending.native.resolve(receipt);
+  };
   const database = openClawStateDatabaseCache.getOpenClawStateDatabaseIfOpenAtPath(
     pending.context.admission.databasePath,
   );
@@ -154,7 +136,7 @@ function settleNativeEvent(pending: PendingEvent, receipt: TaskAgentEventReceipt
     database &&
     stageSqliteTransactionState(database.db, {
       stage() {},
-      commit: () => pending.native.resolve(receipt),
+      commit: committed,
       rollback: (error) => {
         invalidateTaskRegistryProjection();
         pending.native.reject(error);
@@ -163,13 +145,14 @@ function settleNativeEvent(pending: PendingEvent, receipt: TaskAgentEventReceipt
   ) {
     return;
   }
-  pending.native.resolve(receipt);
+  committed();
 }
 
 function advanceCommittedLineage(pending: PendingEvent, facts: unknown): void {
   const next = readTaskAgentEventCommittedTarget(facts, pending.input);
   // Later results must not advance successors accepted after a replacement.
   if (pending.committedTarget) {
+    publishTaskAgentEventLineage(pending);
     return;
   }
   pending.committedTarget = next;
@@ -179,13 +162,14 @@ function advanceCommittedLineage(pending: PendingEvent, facts: unknown): void {
       entry !== active &&
       entry.store === pending.store &&
       entry.context.admission.identity.key === pending.context.admission.identity.key &&
-      sameSource(entry.source, pending.source) &&
+      sameTaskAgentEventSource(entry.source, pending.source) &&
       isDeepStrictEqual(entry.input.expectedTask, pending.input.expectedTask) &&
       isDeepStrictEqual(entry.input.backing, pending.input.backing)
     ) {
       entry.input = { ...entry.input, expectedTask: next };
     }
   }
+  publishTaskAgentEventLineage(pending);
 }
 
 function reportFailure(pending: PendingEvent, error: unknown): void {
@@ -212,8 +196,11 @@ function retainCommittedEventAfterResultFailure(pending: PendingEvent): void {
 
 function prepareNativeEventConsumption(): { consume: () => void; release: () => void } | undefined {
   const store = getTaskRegistryStore();
-  const pending = [...pendingEvents].filter(
-    (entry) => entry.store === store && entry.phase.kind !== "consumed",
+  const accepted = [...pendingEvents].filter((entry) => entry.store === store);
+  const pending = accepted.filter((entry) => entry.phase.kind !== "consumed");
+  // Native successors retain their FIFO position behind worker and deferred observers.
+  const deferObservers = accepted.some(
+    (entry) => entry.phase.kind === "granted" || entry.publishObserver !== undefined,
   );
   if (!pending.length) {
     return undefined;
@@ -247,6 +234,7 @@ function prepareNativeEventConsumption(): { consume: () => void; release: () => 
           }
           const completed = entry.phase.owner.waitForSettlement(deadlineMs);
           if (completed.committed) {
+            entry.commitFacts = completed.committed.facts;
             advanceCommittedLineage(entry, completed.committed.facts);
           }
         }
@@ -273,8 +261,17 @@ function prepareNativeEventConsumption(): { consume: () => void; release: () => 
           current && hasAuthoritativeTaskBacking(current)
             ? prepareTaskAgentEventUpdate(current, entry.input)
             : null;
+        let publishObserver: (() => void) | undefined;
         const publication = receipt
-          ? updateTaskWithPublication(receipt.task.taskId, receipt.patch)
+          ? updateTaskWithPublication(
+              receipt.task.taskId,
+              receipt.patch,
+              deferObservers
+                ? (publish) => {
+                    publishObserver = publish;
+                  }
+                : undefined,
+            )
           : null;
         if (receipt && !publication) {
           throw new Error("Failed to persist accepted task event before synchronous mutation");
@@ -300,13 +297,19 @@ function prepareNativeEventConsumption(): { consume: () => void; release: () => 
             const latest = tasks.get(entry.input.taskId);
             if (latest && publication.isCurrent() && isEquivalentTaskRecord(latest, receipt.task)) {
               entry.delivery = { receipt, isCurrent: publication.isCurrent };
+              publishObserver?.();
             }
           };
           const database = openClawStateDatabaseCache.getOpenClawStateDatabaseIfOpenAtPath(
             entry.context.admission.databasePath,
           );
-          if (!database || !deferSqlitePostCommitPublication(database.db, publish)) {
-            publish();
+          const afterCommit = deferObservers
+            ? () => {
+                entry.publishObserver = publish;
+              }
+            : publish;
+          if (!database || !deferSqlitePostCommitPublication(database.db, afterCommit)) {
+            afterCommit();
           }
         }
       }
@@ -368,7 +371,7 @@ async function persist(pending: PendingEvent): Promise<void> {
     runId: input.expectedTask.runId,
     childSessionKey: input.expectedTask.childSessionKey,
   };
-  let flowEffectsSettled = false;
+  let flowHookEntered = false;
   let publicationFailure: { error: unknown } | undefined;
   try {
     try {
@@ -428,12 +431,12 @@ async function persist(pending: PendingEvent): Promise<void> {
               ) {
                 clearTaskActivity(taskId);
               }
+              flowHookEntered = true;
               await finishTaskMutation(context, store, flowStore, taskId, {
                 operation: "update",
                 assertCurrent: assertCurrentOwners,
               });
               assertCurrentOwners();
-              flowEffectsSettled = true;
             }
           },
           forcePublish: () => pending.publication?.task,
@@ -519,7 +522,7 @@ async function persist(pending: PendingEvent): Promise<void> {
       throw publicationFailure.error;
     }
   } finally {
-    if (!flowEffectsSettled && pending.committedTarget && pending.phase.kind !== "consumed") {
+    if (!flowHookEntered && pending.committedTarget && pending.phase.kind !== "consumed") {
       const current = tasks.get(taskId);
       if (
         current &&
@@ -546,6 +549,11 @@ function startDrain(): void {
             await entry.native.promise;
           } else {
             await persist(entry);
+          }
+          try {
+            entry.publishObserver?.();
+          } finally {
+            delete entry.publishObserver;
           }
           entry.completion.resolve();
         } catch (error) {
@@ -582,43 +590,28 @@ function startDrain(): void {
   void operation.finally(() => drains.delete(operation));
 }
 
-function sameSource(left: EventSource, right: EventSource): boolean {
-  return (
-    left.runId === right.runId &&
-    left.lifecycleGeneration === right.lifecycleGeneration &&
-    left.runContext === right.runContext &&
-    left.subagent === right.subagent &&
-    left.subagentGeneration === right.subagentGeneration
-  );
-}
-
 /** At most one active batch and four ordered pending batches per live task identity. */
 export function enqueueTaskAgentEvent(
   initialTask: TaskAgentEventTarget,
   event: AgentEventPayload,
 ): boolean {
   let task = initialTask;
-  const runId = event.runId;
-  const subagent = subagentRuns.get(runId);
-  const source: EventSource = {
-    runId,
-    lifecycleGeneration: event.lifecycleGeneration ?? getAgentRunLifecycleGeneration(),
-    runContext: getAgentRunContext(runId),
-    subagent,
-    subagentGeneration: subagent?.generation,
-  };
+  const source = captureTaskAgentEventSource(event);
   const entries = pendingByTask.get(task.taskId);
   const store = getTaskRegistryStore();
   const flowStore = getTaskFlowRegistryStore();
   const resident = tasks.get(task.taskId);
   const owned = [...(entries ?? [])].filter(
     (entry) =>
-      entry.store === store && entry.flowStore === flowStore && sameSource(source, entry.source),
+      entry.store === store &&
+      entry.flowStore === flowStore &&
+      sameTaskAgentEventSource(source, entry.source),
   );
   for (const entry of owned) {
     if (entry.phase.kind === "granted" && !entry.committedTarget) {
       const facts = entry.phase.owner.settlement?.committed?.facts;
       if (facts !== undefined) {
+        entry.commitFacts = facts;
         advanceCommittedLineage(entry, facts);
       }
     }
@@ -638,7 +631,7 @@ export function enqueueTaskAgentEvent(
     task = { ...task, createdAt: committed.committedTarget.createdAt };
   }
   const matches = (entry: PendingEvent) =>
-    sameSource(source, entry.source) &&
+    sameTaskAgentEventSource(source, entry.source) &&
     matchesTaskPersistenceReceipt(task, entry.committedTarget ?? entry.input.expectedTask) &&
     isDeepStrictEqual(task.backing, entry.input.backing);
   for (const entry of entries ?? []) {

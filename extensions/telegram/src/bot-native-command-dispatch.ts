@@ -43,7 +43,7 @@ import {
 } from "./ingress.js";
 
 const loadTelegramNativeCommandDeliveryRuntime = createLazyRuntimeModule(
-  () => import("./bot-native-commands.delivery.runtime.js"),
+  () => import("./bot/delivery.js"),
 );
 const loadTelegramNativeCommandRuntime = createLazyRuntimeModule(
   () => import("./bot-native-commands.runtime.js"),
@@ -107,7 +107,7 @@ export type TelegramCommandDispatch = TelegramCommandExecutorParams &
     loadDeliveryRuntime: () => Promise<TelegramNativeCommandDeliveryRuntime>;
   };
 
-async function resolveTelegramNativeCommandThreadContext(params: {
+export async function resolveTelegramNativeCommandThreadContext(params: {
   msg: NonNullable<Context["message"]>;
   bot: Bot;
 }) {
@@ -391,7 +391,8 @@ export async function prepareTelegramCommandDispatch(
   const { route, bindingMode, targetSessionKey } = auth;
   const nativeCommandRuntime = await loadTelegramNativeCommandRuntime();
   auth.assertOwnerCurrent?.();
-  touchTelegramConversationRoute(auth.inspectedRoute);
+  await touchTelegramConversationRoute(auth.inspectedRoute);
+  auth.assertOwnerCurrent?.();
   if (bindingMode.kind === "configured") {
     auth.assertOwnerCurrent?.();
     const ensured = await nativeCommandRuntime.ensureConfiguredBindingRouteReady({

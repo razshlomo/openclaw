@@ -8,7 +8,10 @@ import { renderChatPositionRail } from "./chat-position-rail.ts";
 import { getTranscriptState } from "./chat-thread-interactions.ts";
 import { renderChatThread } from "./chat-thread.ts";
 import { ChatTranscriptController } from "./chat-transcript-controller.ts";
-import { publishTranscriptScroll } from "./chat-transcript-scroll-events.ts";
+import {
+  publishTranscriptScroll,
+  subscribeTranscriptScroll,
+} from "./chat-transcript-scroll-events.ts";
 import {
   installTranscriptDomMocks,
   mountTestTranscript,
@@ -84,7 +87,7 @@ describe("conversation position rail", () => {
         message: message(`message-${index}`, "user", `Checkpoint ${index}`, index + 1),
       }));
       render(
-        transcript.renderSession("rail-publication", "agent:main:rail-publication", (session) => {
+        transcript.renderSession("agent:main:rail-publication", (session) => {
           vi.spyOn(session, "activeMessageId").mockImplementation(activeMessage);
           return html`<div class="chat-thread" tabindex="0">
             <div class="chat-bubble" data-entry-id="message-79">Latest message</div>
@@ -169,6 +172,7 @@ describe("conversation position rail", () => {
     "focus-resize",
     "pointer",
     "reader",
+    "reader-offset",
     "composer-resize-reversal-navigation",
   ] as const;
 
@@ -198,17 +202,13 @@ describe("conversation position rail", () => {
         ),
       };
       render(
-        transcript.renderSession(
-          "rail-scroll-policy",
-          "agent:main:rail-scroll-policy",
-          (session) => {
-            vi.spyOn(session, "activeMessageId").mockImplementation(activeMessage);
-            return html`<div class="chat-thread" tabindex="0">
-              <div class="chat-bubble" data-entry-id="message-79">Latest message</div>
-              ${renderChatPositionRail({ positions, transcript: session, requestUpdate: () => {} })}
-            </div>`;
-          },
-        ),
+        transcript.renderSession("agent:main:rail-scroll-policy", (session) => {
+          vi.spyOn(session, "activeMessageId").mockImplementation(activeMessage);
+          return html`<div class="chat-thread" tabindex="0">
+            <div class="chat-bubble" data-entry-id="message-79">Latest message</div>
+            ${renderChatPositionRail({ positions, transcript: session, requestUpdate: () => {} })}
+          </div>`;
+        }),
         container,
       );
       const root = container.querySelector<HTMLElement>(".chat-thread")!;
@@ -405,6 +405,20 @@ describe("conversation position rail", () => {
           flush();
           expect(document.activeElement).toBe(marker(79));
           expect(marks.scrollTop).toBe(720);
+        } else if (scenario === "reader-offset") {
+          // Reading within the rendered rows re-renders nothing; the published
+          // offset alone must move the current marker.
+          activeMessage.mockReturnValue("message-78");
+          root.scrollTop = 8200;
+          publishTranscriptScroll(root, {
+            type: "offset",
+            delta: -115,
+            scrolling: true,
+            touching: false,
+            programmatic: false,
+          });
+          flushFrame();
+          expect(marker(78).getAttribute("aria-current")).toBe("true");
         } else if (scenario === "pointer") {
           marker(60).dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
           marker(60).focus();
@@ -541,15 +555,18 @@ describe("conversation position rail", () => {
     }
   });
 
-  it("publishes consecutive reader offsets even when the virtual row range is unchanged", async () => {
+  it("publishes consecutive reader offsets without re-rendering an unchanged row range", async () => {
     transcriptDomState.measuredRowHeight = 120;
     const requestUpdate = vi.fn();
-    const transcript = new ChatTranscriptController({
-      addController: () => undefined,
-      removeController: () => undefined,
-      requestUpdate,
-      updateComplete: Promise.resolve(true),
-    });
+    const transcript = new ChatTranscriptController(
+      {
+        addController: () => undefined,
+        removeController: () => undefined,
+        requestUpdate,
+        updateComplete: Promise.resolve(true),
+      },
+      () => "rail-notification",
+    );
     const rows: TestContentRow[] = Array.from({ length: 40 }, (_, index) => ({
       kind: "content",
       key: `row-${index}`,
@@ -560,6 +577,12 @@ describe("conversation position rail", () => {
       rows,
       transcript,
     );
+    const offsets: number[] = [];
+    const stop = subscribeTranscriptScroll(container, (observation) => {
+      if (observation.type === "offset") {
+        offsets.push(observation.delta);
+      }
+    });
     try {
       Object.defineProperties(container, {
         clientHeight: { configurable: true, value: 600 },
@@ -579,18 +602,19 @@ describe("conversation position rail", () => {
       container.dispatchEvent(new Event("scroll"));
       expect(currentId()).toBe("row-2");
       requestUpdate.mockClear();
+      offsets.length = 0;
 
       // Both viewports span rows 0–5, but their midpoints straddle row 3.
-      // TanStack's range/isScrolling notification alone cannot publish this.
+      // The rail follows the published offset; the pane keeps its rows.
       container.scrollTop = 70;
       container.dispatchEvent(new Event("scroll"));
-      expect(requestUpdate).toHaveBeenCalled();
+      expect(offsets).toEqual([20]);
       expect(currentId()).toBe("row-3");
-      requestUpdate.mockClear();
       container.scrollTop = 50;
       container.dispatchEvent(new Event("scroll"));
-      expect(requestUpdate).toHaveBeenCalled();
+      expect(offsets).toEqual([20, -20]);
       expect(currentId()).toBe("row-2");
+      expect(requestUpdate).not.toHaveBeenCalled();
 
       Object.defineProperty(container, "clientHeight", { configurable: true, value: 640 });
       for (const observer of resizeObservers) {
@@ -607,6 +631,7 @@ describe("conversation position rail", () => {
       container.dispatchEvent(new Event("scroll"));
       expect(requestUpdate).not.toHaveBeenCalled();
     } finally {
+      stop();
       transcript.hostDisconnected();
     }
   });
