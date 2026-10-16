@@ -1,6 +1,7 @@
 // Extracts what a later vote needs from an incoming WhatsApp poll, and records it.
 import { isJidGroup, type WAMessage } from "baileys";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { WhatsAppSelfIdentity } from "../identity.js";
 import { resolveWhatsAppInboundPolicy } from "../inbound-policy.js";
 import {
   normalizeWhatsAppPollJids,
@@ -85,7 +86,7 @@ export function extractWhatsAppInboundPollRecord(
   const key = (msg.key ?? {}) as WAMessageKeyWithAlt;
   const chatJids = normalizeWhatsAppPollJids([key.remoteJid, key.remoteJidAlt]);
   const isGroup = Boolean(key.remoteJid && isJidGroup(key.remoteJid));
-  // A poll sent from the linked phone is ours; its creator JID comes from the vote key later.
+  // A poll sent from the linked phone is the owner's; the recorder adds the owner's JIDs.
   const creatorJids = key.fromMe
     ? normalizeWhatsAppPollJids([key.participant, key.participantAlt])
     : normalizeWhatsAppPollJids(
@@ -111,6 +112,12 @@ export function extractWhatsAppInboundPollRecord(
 export async function recordWhatsAppInboundPoll(params: {
   cfg: OpenClawConfig;
   accountId: string;
+  /** The linked phone; the record belongs to it. */
+  self: WhatsAppSelfIdentity | null | undefined;
+  /** The sender's number as access control resolved it; lets allowlists match a LID-only creator. */
+  senderE164?: string | null;
+  /** PN/LID equivalents of a direct chat, so later turns under either JID find the poll. */
+  resolveDirectChatJids?: (jid: string) => Promise<string[]>;
   msg: Pick<WAMessage, "key" | "message" | "pushName">;
   group: boolean;
   remoteJid: string;
@@ -134,12 +141,24 @@ export async function recordWhatsAppInboundPoll(params: {
         return;
       }
     }
+    // A failed lookup only costs the alias; the store keeps at most four chat JIDs.
+    const equivalents = params.group
+      ? []
+      : ((await params.resolveDirectChatJids?.(params.remoteJid).catch(() => [])) ?? []);
     await recordWhatsAppPoll(
       {
-        accountId: params.accountId,
+        account: { accountId: params.accountId, self: params.self },
         pollMessageId: params.msg.key?.id ?? "",
         origin: "received",
         ...extracted,
+        chatJids: [...extracted.chatJids, ...equivalents],
+        // The owner's own poll, posted from the linked phone; a direct chat has no participant.
+        ...(params.msg.key?.fromMe
+          ? {
+              creatorJids: [...extracted.creatorJids, params.self?.jid, params.self?.lid],
+              creatorE164: params.self?.e164,
+            }
+          : { creatorE164: params.senderE164 }),
         ...(params.recordedAt !== undefined ? { recordedAt: params.recordedAt } : {}),
       },
       { mode: "ifAbsent" },

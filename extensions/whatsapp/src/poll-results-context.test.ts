@@ -6,9 +6,10 @@ import {
   recordWhatsAppPoll,
   WHATSAPP_POLL_CHAT_INDEX_STORES,
   WHATSAPP_POLL_RECORD_STORES,
+  WHATSAPP_POLL_TALLY_STORES,
   type WhatsAppPollOrigin,
 } from "./poll-vote-store.js";
-import { applyWhatsAppPollVote, WHATSAPP_POLL_TALLY_STORES } from "./poll-vote-tally-store.js";
+import { applyWhatsAppPollVote } from "./poll-vote-tally-store.js";
 import {
   installWhatsAppPollStateRuntimeForTest,
   type WhatsAppPollStateRuntimeForTest,
@@ -17,6 +18,7 @@ import {
 const HOME = "120363000000000001@g.us";
 const OTHER = "120363000000000002@g.us";
 const SECRET = new Uint8Array(32).fill(9);
+const ACCOUNT = { accountId: "default", self: { jid: "15550001111@s.whatsapp.net" } };
 
 let env: WhatsAppPollStateRuntimeForTest;
 let voteClock = 1_760_000_000_000;
@@ -41,7 +43,7 @@ async function addPoll(params: {
 }) {
   await recordWhatsAppPoll(
     {
-      accountId: "default",
+      account: ACCOUNT,
       pollMessageId: params.id,
       origin: params.origin ?? "received",
       chatJids: params.chatJids ?? [HOME],
@@ -58,13 +60,13 @@ async function addPoll(params: {
 }
 
 async function addVote(id: string, voter: string, selected: string[], name?: string) {
-  const record = await readWhatsAppPollRecord("default", id);
+  const record = await readWhatsAppPollRecord(ACCOUNT, id);
   if (!record) {
     throw new Error(`missing poll ${id}`);
   }
   await applyWhatsAppPollVote({
     record,
-    accountId: "default",
+    account: ACCOUNT,
     pollMessageId: id,
     voter: { jids: [voter], name },
     selected,
@@ -85,7 +87,7 @@ describe("readWhatsAppPollResultsContext", () => {
     await addVote("P3", "15550000004@s.whatsapp.net", ["No"]);
 
     const context = await readWhatsAppPollResultsContext({
-      accountId: "default",
+      account: ACCOUNT,
       chatJids: [HOME],
     });
     expect(context).toMatchObject({
@@ -121,13 +123,73 @@ describe("readWhatsAppPollResultsContext", () => {
     expect(polls[2]?.created_by).toBe("Dana");
   });
 
+  it("counts and names only the voters the visibility filter keeps", async () => {
+    await addPoll({ id: "P1", recordedAt: Date.now(), options: ["Pizza", "Sushi"] });
+    await addVote("P1", "15550000001@s.whatsapp.net", ["Pizza"], "Avi");
+    await addVote("P1", "15550000002@s.whatsapp.net", ["Pizza", "Sushi"], "Mallory");
+    const context = await readWhatsAppPollResultsContext({
+      account: ACCOUNT,
+      chatJids: [HOME],
+      filterVoters: (voters) => voters.filter((voter) => voter.name !== "Mallory"),
+    });
+    expect(context?.payload.polls[0]).toMatchObject({
+      voters_total: 1,
+      options: [
+        { option: "Pizza", votes: 1, voters: ["Avi"] },
+        { option: "Sushi", votes: 0, voters: [] },
+      ],
+    });
+    expect(JSON.stringify(context)).not.toContain("Mallory");
+    expect(JSON.stringify(context)).not.toContain("15550000002");
+  });
+
+  it("skips a received poll whose creator the visibility filter hides, never the assistant's own", async () => {
+    const base = Date.now() - 100_000;
+    await addPoll({ id: "P1", recordedAt: base, creatorName: "Mallory", question: "Secret plan?" });
+    await addPoll({ id: "P2", recordedAt: base + 1, origin: "sent", question: "Lunch?" });
+    const seen: string[] = [];
+    const context = await readWhatsAppPollResultsContext({
+      account: ACCOUNT,
+      chatJids: [HOME],
+      isCreatorVisible: (record) => {
+        seen.push(record.origin);
+        return false;
+      },
+    });
+    expect(context?.payload.polls.map((poll) => poll.poll_id)).toEqual(["P2"]);
+    expect(seen).toEqual(["received"]);
+    expect(JSON.stringify(context)).not.toContain("Mallory");
+    expect(JSON.stringify(context)).not.toContain("Secret plan?");
+    expect(JSON.stringify(context)).not.toContain("15550000009");
+  });
+
+  it("does not count a retracted voter", async () => {
+    await addPoll({ id: "P1", recordedAt: Date.now() });
+    await addVote("P1", "15550000001@s.whatsapp.net", ["Yes"], "Avi");
+    await addVote("P1", "15550000001@s.whatsapp.net", []);
+    const context = await readWhatsAppPollResultsContext({
+      account: ACCOUNT,
+      chatJids: [HOME],
+    });
+    expect(context?.payload.polls[0]).toMatchObject({
+      voters_total: 0,
+      options: [
+        { option: "Yes", votes: 0, voters: [] },
+        { option: "No", votes: 0, voters: [] },
+      ],
+    });
+  });
+
   it("returns nothing for another chat or another account", async () => {
     await addPoll({ id: "P1", recordedAt: Date.now() });
     expect(
-      await readWhatsAppPollResultsContext({ accountId: "default", chatJids: [OTHER] }),
+      await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [OTHER] }),
     ).toBeUndefined();
     expect(
-      await readWhatsAppPollResultsContext({ accountId: "work", chatJids: [HOME] }),
+      await readWhatsAppPollResultsContext({
+        account: { ...ACCOUNT, accountId: "work" },
+        chatJids: [HOME],
+      }),
     ).toBeUndefined();
     expect(env.logger.warn).not.toHaveBeenCalled();
   });
@@ -138,7 +200,7 @@ describe("readWhatsAppPollResultsContext", () => {
     const index = env.openStore(WHATSAPP_POLL_CHAT_INDEX_STORES.received);
     for (let offset = 1; offset <= 5; offset++) {
       await index.register(
-        `default:${HOME}:${String(base + offset).padStart(13, "0")}:GONE${offset}`,
+        `default:+15550001111:${HOME}:${String(base + offset).padStart(13, "0")}:GONE${offset}`,
         {
           v: 1,
           pollMessageId: `GONE${offset}`,
@@ -147,7 +209,7 @@ describe("readWhatsAppPollResultsContext", () => {
       );
     }
     const context = await readWhatsAppPollResultsContext({
-      accountId: "default",
+      account: ACCOUNT,
       chatJids: [HOME],
     });
     expect(context?.payload.polls.map((poll) => poll.poll_id)).toEqual(["OLD"]);
@@ -164,7 +226,7 @@ describe("readWhatsAppPollResultsContext", () => {
       );
     }
     const [poll] =
-      (await readWhatsAppPollResultsContext({ accountId: "default", chatJids: [HOME] }))?.payload
+      (await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] }))?.payload
         .polls ?? [];
     const yes = poll?.options[0];
     expect(yes?.votes).toBe(60);
@@ -189,7 +251,7 @@ describe("readWhatsAppPollResultsContext", () => {
       }
     }
     const context = await readWhatsAppPollResultsContext({
-      accountId: "default",
+      account: ACCOUNT,
       chatJids: [HOME],
     });
     const bytes = Buffer.byteLength(JSON.stringify(context?.payload));
@@ -202,11 +264,57 @@ describe("readWhatsAppPollResultsContext", () => {
     expect(polls[1]?.options.map((option) => option.votes)).toEqual([15, 15]);
   });
 
+  it("keeps the agent's own poll when members post more newer polls than the index read", async () => {
+    const base = Date.now() - 100_000;
+    await addPoll({ id: "OURS", recordedAt: base, origin: "sent" });
+    for (let index = 1; index <= 13; index++) {
+      await addPoll({ id: `Q${index}`, recordedAt: base + index, options: ["Yes"] });
+    }
+    const context = await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] });
+    expect(context?.payload.polls.map((poll) => poll.poll_id)).toEqual(["Q13", "Q12", "OURS"]);
+  });
+
+  it("leaves out a poll too large to show on its own instead of every other poll", async () => {
+    const base = Date.now() - 100_000;
+    await addPoll({ id: "OURS", recordedAt: base, origin: "sent" });
+    await addPoll({
+      id: "HUGE",
+      recordedAt: base + 1,
+      options: Array.from({ length: 8 }, (_, index) => `${index}${"x".repeat(600)}`),
+    });
+    const context = await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] });
+    expect(context?.payload.polls.map((poll) => poll.poll_id)).toEqual(["OURS"]);
+  });
+
+  it("trims members' polls before the agent's own when the block is over 4096 bytes", async () => {
+    const base = Date.now() - 100_000;
+    const longOptions = ["A".repeat(400), "B".repeat(400)];
+    await addPoll({ id: "OURS", recordedAt: base, options: longOptions, origin: "sent" });
+    await addPoll({ id: "MIDDLE", recordedAt: base + 1, options: longOptions });
+    await addPoll({ id: "NEWEST", recordedAt: base + 2, options: longOptions });
+    for (const id of ["OURS", "MIDDLE", "NEWEST"]) {
+      for (let index = 0; index < 30; index++) {
+        await addVote(
+          id,
+          `1555200${String(index).padStart(4, "0")}@s.whatsapp.net`,
+          [longOptions[index % 2] ?? ""],
+          `Voter number ${index} with a long display name`,
+        );
+      }
+    }
+    const context = await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] });
+    expect(Buffer.byteLength(JSON.stringify(context?.payload))).toBeLessThanOrEqual(4096);
+    const polls = context?.payload.polls ?? [];
+    expect(polls.map((poll) => poll.poll_id)).toEqual(["NEWEST", "OURS"]);
+    expect(polls[0]?.options.map((option) => option.voters)).toEqual([["+15 more"], ["+15 more"]]);
+    expect(polls[1]?.options[0]?.voters).toContain("Voter number 0 with a long display name");
+  });
+
   it("never exposes LID JIDs, the secret or option hashes", async () => {
     await addPoll({ id: "P1", recordedAt: Date.now(), options: ["Yes"] });
     await addVote("P1", "11110000003@lid", ["Yes"]);
     const json = JSON.stringify(
-      await readWhatsAppPollResultsContext({ accountId: "default", chatJids: [HOME] }),
+      await readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] }),
     );
     expect(json).not.toContain("@lid");
     expect(json).not.toContain(Buffer.from(SECRET).toString("base64"));
@@ -233,7 +341,7 @@ describe("readWhatsAppPollResultsContext", () => {
       await addPoll({ id: "P1", recordedAt: Date.now() });
       env.faults.push({ namespace, method, code });
       await expect(
-        readWhatsAppPollResultsContext({ accountId: "default", chatJids: [HOME] }),
+        readWhatsAppPollResultsContext({ account: ACCOUNT, chatJids: [HOME] }),
       ).resolves.toBeUndefined();
       expect(env.logger.warn).toHaveBeenCalledTimes(1);
       expect(env.logger.warn).toHaveBeenCalledWith("whatsapp poll results read failed", {

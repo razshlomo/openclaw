@@ -1,10 +1,12 @@
 // Turns an encrypted WhatsApp poll vote into a stored tally row, and in a direct
 // chat on the agent's own poll into a message for the agent.
-import type { proto, WAMessage } from "baileys";
+import { proto, type WAMessage } from "baileys";
 import { redactIdentifier } from "openclaw/plugin-sdk/logging-core";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
+import type { WhatsAppSelfIdentity } from "../identity.js";
 import { decodeWhatsAppPollVote } from "../poll-vote-decode.js";
 import {
+  deleteWhatsAppPoll,
   isTransientWhatsAppPollStoreError,
   normalizeWhatsAppPollJids,
   normalizeWhatsAppPollMessageId,
@@ -16,6 +18,7 @@ import {
 import {
   applyWhatsAppPollVote,
   normalizeWhatsAppPollVoteTimestampMs,
+  type WhatsAppPollVoteApplyResult,
 } from "../poll-vote-tally-store.js";
 import { isJidGroup, normalizeMessageContent } from "./runtime-api.js";
 
@@ -26,8 +29,11 @@ export type WhatsAppPollVoteResolution =
 
 export type WhatsAppPollVoteDeps = {
   accountId: string;
-  /** The account's own PN/LID JIDs: the voter of a fromMe vote, a creator candidate otherwise. */
-  selfJids: readonly (string | null | undefined)[];
+  /**
+   * The linked phone: owns the polls the vote may land on; its PN/LID JIDs are the
+   * voter of a fromMe vote and a creator candidate otherwise.
+   */
+  self: WhatsAppSelfIdentity | null | undefined;
   resolveInboundJid?: (jid: string) => Promise<string | null | undefined>;
 };
 
@@ -97,7 +103,9 @@ function buildDerivedVoteMessage(
 /**
  * Votes never wake the agent in a group, on someone else's poll, or when the
  * vote is our own; those end as "completed" once counted. Only a direct-chat
- * vote on a poll the agent sent is delivered, as a message quoting the poll.
+ * vote on a poll the agent sent is delivered, as a message quoting the poll,
+ * and only when it is not older than the voter's stored row. A store that
+ * cannot take the vote still delivers it.
  * Transient store failures propagate so durable ingress replays the vote.
  */
 export async function resolveWhatsAppPollVote(
@@ -113,7 +121,9 @@ export async function resolveWhatsAppPollVote(
   if (!pollMessageId) {
     return { kind: "completed" };
   }
-  const record = await readWhatsAppPollRecord(deps.accountId, pollMessageId);
+  const account = { accountId: deps.accountId, self: deps.self };
+  const selfJids = [deps.self?.jid, deps.self?.lid];
+  const record = await readWhatsAppPollRecord(account, pollMessageId);
   if (!record) {
     logVerbose("whatsapp poll vote for an unknown poll; ignored");
     return { kind: "completed" };
@@ -123,7 +133,7 @@ export async function resolveWhatsAppPollVote(
   const fromMe = Boolean(key.fromMe);
   const voterJids = normalizeWhatsAppPollJids(
     fromMe
-      ? [key.participant, key.participantAlt, ...deps.selfJids]
+      ? [key.participant, key.participantAlt, ...selfJids]
       : group
         ? [key.participant, key.participantAlt]
         : [key.remoteJid, key.remoteJidAlt],
@@ -135,7 +145,7 @@ export async function resolveWhatsAppPollVote(
     creatorJids: [
       creationKey?.participant,
       (creationKey as WAMessageKeyWithAlt | undefined)?.participantAlt,
-      ...deps.selfJids,
+      ...selfJids,
     ],
     voterJids,
     chat: {
@@ -155,10 +165,11 @@ export async function resolveWhatsAppPollVote(
     return { kind: "completed" };
   }
   const deliver = !group && !fromMe && record.origin === "sent";
+  let applied: WhatsAppPollVoteApplyResult = "skipped";
   try {
-    await applyWhatsAppPollVote({
+    applied = await applyWhatsAppPollVote({
       record,
-      accountId: deps.accountId,
+      account,
       pollMessageId,
       voter: {
         jids: voterJids,
@@ -181,11 +192,57 @@ export async function resolveWhatsAppPollVote(
       code: readPluginStateErrorCode(error) ?? "unknown",
     });
   }
-  if (!deliver) {
+  // A stale vote was superseded before it arrived; the agent already saw the newer one.
+  if (!deliver || applied === "stale") {
     return { kind: "completed" };
   }
   return {
     kind: "deliver",
-    message: buildDerivedVoteMessage(msg, pollMessageId, record, decoded.selected, deps.selfJids),
+    message: buildDerivedVoteMessage(msg, pollMessageId, record, decoded.selected, selfJids),
   };
+}
+
+/**
+ * A poll deleted for everyone takes its stored question, voters and secret
+ * with it. Only the creator (or the linked phone itself) can delete it, and
+ * only in the chat it was recorded for. True once the poll is gone; false for
+ * anything else, which then continues as before. Transient store failures
+ * propagate so durable ingress replays the deletion.
+ */
+export async function resolveWhatsAppPollRevoke(
+  msg: WAMessage,
+  deps: WhatsAppPollVoteDeps,
+): Promise<boolean> {
+  const protocol = normalizeMessageContent(msg.message)?.protocolMessage;
+  const revokedId = protocol?.key?.id;
+  if (protocol?.type !== proto.Message.ProtocolMessage.Type.REVOKE || !revokedId) {
+    return false;
+  }
+  const pollMessageId = normalizeWhatsAppPollMessageId(revokedId);
+  const account = { accountId: deps.accountId, self: deps.self };
+  const record = pollMessageId ? await readWhatsAppPollRecord(account, pollMessageId) : undefined;
+  if (!pollMessageId || !record) {
+    return false;
+  }
+  const key = (msg.key ?? {}) as WAMessageKeyWithAlt;
+  const chatJids = normalizeWhatsAppPollJids([key.remoteJid, key.remoteJidAlt]);
+  if (!record.chatJids.some((jid) => chatJids.includes(jid))) {
+    return false;
+  }
+  const group = Boolean(key.remoteJid && isJidGroup(key.remoteJid));
+  const revokerJids = normalizeWhatsAppPollJids(
+    group ? [key.participant, key.participantAlt] : [key.remoteJid, key.remoteJidAlt],
+  );
+  const byCreator =
+    Boolean(key.fromMe) ||
+    (record.origin === "received" &&
+      (revokerJids.some((jid) => record.creatorJids.includes(jid)) ||
+        (record.creatorE164 !== undefined &&
+          (await resolveVoterE164(revokerJids, deps.resolveInboundJid)) === record.creatorE164)));
+  if (!byCreator) {
+    logVerbose("whatsapp poll deletion by someone other than its creator; ignored");
+    return false;
+  }
+  await deleteWhatsAppPoll({ account, pollMessageId, record });
+  return true;
 }
