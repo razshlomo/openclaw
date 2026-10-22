@@ -121,34 +121,19 @@ function findJid(jids: readonly string[], suffix: string): string | null {
  * Poll votes are other members' content, filtered like group history: under
  * allowlist and allowlist_quote alike, a blocked voter is neither named nor counted.
  */
-export function resolveVisibleWhatsAppPollVoters(params: {
-  authDir?: string;
-  isGroup: boolean;
-  voters: WhatsAppPollTallyVoter[];
-  mode: ContextVisibilityMode;
-  groupPolicy: "open" | "allowlist" | "disabled";
-  groupAllowFrom: string[];
-}): WhatsAppPollTallyVoter[] {
+export function resolveVisibleWhatsAppPollVoters(
+  params: ContextVisibilityOptions & { isGroup: boolean; voters: WhatsAppPollTallyVoter[] },
+): WhatsAppPollTallyVoter[] {
   return filterSupplementalContextItems({
     items: params.voters,
     mode: params.mode,
     kind: "history",
     isSenderAllowed: (voter) => {
       const jids = [voter.voterKey, ...voter.voterJids];
-      return resolveInboundSupplementalSenderAllowed({
-        isGroup: params.isGroup,
-        groupPolicy: params.groupPolicy,
-        allowFrom: params.groupAllowFrom,
-        isSenderAllowed: (allowFrom) =>
-          isWhatsAppSupplementalSenderAllowed({
-            allowFrom,
-            authDir: params.authDir,
-            sender: {
-              jid: findJid(jids, "@s.whatsapp.net"),
-              lid: findJid(jids, "@lid"),
-              e164: voter.e164 ?? null,
-            },
-          }),
+      return isWhatsAppContextSenderAllowed(params, params.isGroup, {
+        jid: findJid(jids, "@s.whatsapp.net"),
+        lid: findJid(jids, "@lid"),
+        e164: voter.e164 ?? null,
       });
     },
   }).items;
@@ -158,15 +143,13 @@ export function resolveVisibleWhatsAppPollVoters(params: {
  * A received poll is its creator's content: under allowlist and allowlist_quote
  * alike, a blocked creator's question, options and name stay out of the context.
  */
-export function isWhatsAppPollCreatorVisible(params: {
-  authDir?: string;
-  isGroup: boolean;
-  creatorJids: readonly string[];
-  creatorE164?: string;
-  mode: ContextVisibilityMode;
-  groupPolicy: "open" | "allowlist" | "disabled";
-  groupAllowFrom: string[];
-}): boolean {
+export function isWhatsAppPollCreatorVisible(
+  params: ContextVisibilityOptions & {
+    isGroup: boolean;
+    creatorJids: readonly string[];
+    creatorE164?: string;
+  },
+): boolean {
   const jids = params.creatorJids;
   return (
     filterSupplementalContextItems({
@@ -174,20 +157,10 @@ export function isWhatsAppPollCreatorVisible(params: {
       mode: params.mode,
       kind: "history",
       isSenderAllowed: () =>
-        resolveInboundSupplementalSenderAllowed({
-          isGroup: params.isGroup,
-          groupPolicy: params.groupPolicy,
-          allowFrom: params.groupAllowFrom,
-          isSenderAllowed: (allowFrom) =>
-            isWhatsAppSupplementalSenderAllowed({
-              allowFrom,
-              authDir: params.authDir,
-              sender: {
-                jid: findJid(jids, "@s.whatsapp.net"),
-                lid: findJid(jids, "@lid"),
-                e164: params.creatorE164 ?? null,
-              },
-            }),
+        isWhatsAppContextSenderAllowed(params, params.isGroup, {
+          jid: findJid(jids, "@s.whatsapp.net"),
+          lid: findJid(jids, "@lid"),
+          e164: params.creatorE164 ?? null,
         }),
     }).items.length > 0
   );
