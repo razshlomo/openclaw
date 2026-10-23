@@ -32,7 +32,7 @@ notifications include an `Inspect` link into the Control UI. Command and script
 completion announcements open the automation run; isolated agent announcements
 open the run's session.
 
-For a `current` job using `announce` (the default), the final assistant result is a first-class session completion, not a WebChat-specific outbound message. OpenClaw waits for active turns in the creation-bound conversation, verifies that the same session generation still owns the key, and commits the result through the canonical transcript writer with cron job/run provenance and a job/run idempotency key. A retry cannot append the same result twice.
+For a `current` job using `announce` (the default), the final assistant result is a first-class session completion, not a WebChat-specific outbound message. The commit does not wait for an active turn in the creation-bound conversation; the transcript writer preserves ordering. OpenClaw verifies that the same session generation still owns the key, and commits the result through the canonical transcript writer with cron job/run provenance and a job/run idempotency key. A retry cannot append the same result twice.
 
 Isolated agent-turn jobs created from a conversation also capture that conversation's session key and generation at creation. When `announce` has no explicit channel, recipient, account, or thread and the creating conversation has no remembered external route, the final result uses the same conversation-completion path. `channel: "last"` also allows this behavior. The run keeps its own isolated session; delivering its result does not make it a `current` run or give it the creating conversation's history. This applies to the automations tool and `cron.add` requests that supply the creating session.
 
