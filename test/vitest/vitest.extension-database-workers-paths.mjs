@@ -457,7 +457,6 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/whatsapp/src/auto-reply/monitor/process-message.poll-results.test.ts",
   "extensions/whatsapp/src/auto-reply/monitor/process-message.response-prefix.test.ts",
   "extensions/whatsapp/src/inbound/poll-vote-inbound.test.ts",
-  "extensions/whatsapp/src/inbound/poll-vote-real-fixtures.test.ts",
   "extensions/whatsapp/src/inbound/send-api.poll-record.test.ts",
   "extensions/whatsapp/src/monitor-inbox.poll-votes.test.ts",
   "extensions/whatsapp/src/poll-results-context.test.ts",

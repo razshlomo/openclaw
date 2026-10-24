@@ -13,25 +13,18 @@ export type WhatsAppPollVoteCapturedBytes = {
   value: unknown;
 };
 
-export type WhatsAppPollVoteMessageKey = {
-  id?: string | null;
-  remoteJid?: string | null;
-  remoteJidAlt?: string | null;
-  participant?: string | null;
-  participantAlt?: string | null;
-  fromMe?: boolean | null;
-};
-
+/** Never holds the poll secret or option names; the vote stays encrypted. */
 export type WhatsAppPollVoteFailureCapture = {
   v: 1;
   capturedAt: number;
   accountId: string;
   pollMessageId: string;
-  key: WhatsAppPollVoteMessageKey;
-  pollCreationKey: WhatsAppPollVoteMessageKey;
+  /** The vote message key as received, including addressingMode and the Alt JIDs. */
+  key: unknown;
+  /** The poll update without its vote: pollCreationMessageKey, metadata, senderTimestampMs. */
+  update: unknown;
   encPayload: WhatsAppPollVoteCapturedBytes;
   encIv: WhatsAppPollVoteCapturedBytes;
-  senderTimestampMs: unknown;
   messageTimestamp: unknown;
   creatorJids: string[];
   voterJids: string[];
@@ -49,19 +42,6 @@ export function describeWhatsAppPollVoteBytes(value: unknown): WhatsAppPollVoteC
     return { type: "string", length: value.length, value };
   }
   return { type: value === null ? "null" : typeof value, length: 0, value: value ?? null };
-}
-
-export function pickWhatsAppPollVoteMessageKey(
-  key: WhatsAppPollVoteMessageKey | null | undefined,
-): WhatsAppPollVoteMessageKey {
-  return {
-    id: key?.id,
-    remoteJid: key?.remoteJid,
-    remoteJidAlt: key?.remoteJidAlt,
-    participant: key?.participant,
-    participantAlt: key?.participantAlt,
-    fromMe: key?.fromMe,
-  };
 }
 
 export function resolveWhatsAppPollVoteFailureDir(stateDir: string): string {
@@ -91,10 +71,19 @@ export async function saveWhatsAppPollVoteFailure(
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const fileName = `${capture.capturedAt}-${capture.pollMessageId}-${randomUUID().slice(0, 8)}.json`;
   const filePath = path.join(dir, fileName);
-  await fs.writeFile(filePath, `${JSON.stringify(capture, null, 2)}\n`, {
-    mode: 0o600,
-    flag: "wx",
-  });
-  await removeOldestCaptures(dir);
+  // A failed write (disk full) leaves no truncated capture: only a complete file gets its .json name.
+  const tempPath = path.join(dir, `.${fileName}.tmp`);
+  try {
+    await fs.writeFile(tempPath, `${JSON.stringify(capture, null, 2)}\n`, {
+      mode: 0o600,
+      flag: "wx",
+    });
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  // The file is saved either way; a prune that fails now is retried on the next capture.
+  await removeOldestCaptures(dir).catch(() => undefined);
   return filePath;
 }

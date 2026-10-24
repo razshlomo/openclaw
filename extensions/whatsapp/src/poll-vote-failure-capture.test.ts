@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   describeWhatsAppPollVoteBytes,
   resolveWhatsAppPollVoteFailureDir,
@@ -21,10 +21,12 @@ function capture(capturedAt: number): WhatsAppPollVoteFailureCapture {
     accountId: "default",
     pollMessageId: "POLL1",
     key: { id: "VOTE1", remoteJid: "11110000002@lid", fromMe: false },
-    pollCreationKey: { id: "POLL1", remoteJid: "11110000002@lid" },
+    update: {
+      pollCreationMessageKey: { id: "POLL1", remoteJid: "11110000002@lid" },
+      senderTimestampMs: 1_760_000_000_000,
+    },
     encPayload: describeWhatsAppPollVoteBytes(Buffer.from([1, 2, 3])),
     encIv: describeWhatsAppPollVoteBytes(Buffer.from([4, 5])),
-    senderTimestampMs: 1_760_000_000_000,
     messageTimestamp: 1_760_000_000,
     creatorJids: ["15550000001@s.whatsapp.net"],
     voterJids: ["11110000002@lid"],
@@ -37,6 +39,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(stateDir, { recursive: true, force: true });
 });
 
@@ -87,5 +90,28 @@ describe("saveWhatsAppPollVoteFailure", () => {
     const files = (await fs.readdir(resolveWhatsAppPollVoteFailureDir(stateDir))).toSorted();
     expect(files).toHaveLength(WHATSAPP_POLL_VOTE_FAILURE_MAX_FILES);
     expect(files[0]?.startsWith("1760000000003-")).toBe(true);
+  });
+
+  it("returns the saved file when pruning old files fails", async () => {
+    const readdir = vi
+      .spyOn(fs, "readdir")
+      .mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
+    const filePath = await saveWhatsAppPollVoteFailure(capture(1_760_000_000_000));
+    expect(readdir).toHaveBeenCalledOnce();
+    expect(JSON.parse(await fs.readFile(filePath ?? "", "utf8"))).toEqual(
+      capture(1_760_000_000_000),
+    );
+  });
+
+  it("leaves no partial file when the write fails", async () => {
+    const writeFile = fs.writeFile.bind(fs);
+    vi.spyOn(fs, "writeFile").mockImplementationOnce(async (file, data, options) => {
+      await writeFile(file, String(data).slice(0, 10), options);
+      throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+    });
+    await expect(saveWhatsAppPollVoteFailure(capture(1_760_000_000_000))).rejects.toMatchObject({
+      code: "ENOSPC",
+    });
+    expect(await fs.readdir(resolveWhatsAppPollVoteFailureDir(stateDir))).toEqual([]);
   });
 });
