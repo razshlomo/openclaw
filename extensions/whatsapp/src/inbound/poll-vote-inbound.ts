@@ -7,7 +7,6 @@ import type { WhatsAppSelfIdentity } from "../identity.js";
 import { decodeWhatsAppPollVote } from "../poll-vote-decode.js";
 import {
   describeWhatsAppPollVoteBytes,
-  pickWhatsAppPollVoteMessageKey,
   saveWhatsAppPollVoteFailure,
 } from "../poll-vote-failure-capture.js";
 import {
@@ -73,13 +72,15 @@ async function resolveVoterE164(
   return undefined;
 }
 
-/** Keeps the JID server (PN or LID) visible; the user part is hashed. */
-function redactPollJid(jid: string): string {
-  const server = jid.includes("@") ? jid.slice(jid.lastIndexOf("@") + 1) : "";
-  return `${redactIdentifier(jid)}@${server}`;
+/** Logs carry only the JID kind: a hash of a phone-number JID is reversible. */
+function pollJidKind(jid: string): "lid" | "pn" | "other" {
+  if (jid.endsWith("@lid")) {
+    return "lid";
+  }
+  return jid.endsWith("@s.whatsapp.net") ? "pn" : "other";
 }
 
-/** Saves the raw vote privately; the returned log fields hold only redacted JIDs and sizes. */
+/** Saves the raw vote privately; the returned log fields hold only JID kinds and sizes. */
 async function captureDecryptFailure(params: {
   msg: WAMessage;
   update: proto.Message.IPollUpdateMessage;
@@ -99,13 +100,10 @@ async function captureDecryptFailure(params: {
         capturedAt: Date.now(),
         accountId: params.accountId,
         pollMessageId: params.pollMessageId,
-        key: pickWhatsAppPollVoteMessageKey(params.msg.key as WAMessageKeyWithAlt | undefined),
-        pollCreationKey: pickWhatsAppPollVoteMessageKey(
-          params.update.pollCreationMessageKey as WAMessageKeyWithAlt | undefined,
-        ),
+        key: params.msg.key ?? null,
+        update: { ...params.update, vote: undefined },
         encPayload,
         encIv,
-        senderTimestampMs: params.update.senderTimestampMs ?? null,
         messageTimestamp: params.msg.messageTimestamp ?? null,
         creatorJids: params.creatorJids,
         voterJids: params.voterJids,
@@ -115,8 +113,10 @@ async function captureDecryptFailure(params: {
     captureError = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown";
   }
   return {
-    creators: params.creatorJids.map(redactPollJid),
-    voters: params.voterJids.map(redactPollJid),
+    // Replaces the hashed chat in the log line; the saved file has the JIDs themselves.
+    chat: pollJidKind(params.msg.key?.remoteJid ?? ""),
+    creators: params.creatorJids.map(pollJidKind),
+    voters: params.voterJids.map(pollJidKind),
     encPayloadType: encPayload.type,
     encPayloadLength: encPayload.length,
     encIvType: encIv.type,

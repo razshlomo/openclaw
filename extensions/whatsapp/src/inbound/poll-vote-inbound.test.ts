@@ -278,9 +278,11 @@ describe("resolveWhatsAppPollVote", () => {
     expect(await tallyRows("sent")).toEqual([]);
   });
 
-  it("saves an undecryptable vote privately and logs only redacted candidates and sizes", async () => {
+  it("saves an undecryptable vote privately and logs only JID kinds and sizes", async () => {
     await addPoll({ origin: "sent", chatJid: DM });
     const msg = voteMessage({ secret: new Uint8Array(32).fill(1) });
+    Object.assign(msg.key, { addressingMode: "pn", remoteJidAlt: DM_LID });
+    Object.assign(msg.message?.pollUpdateMessage ?? {}, { metadata: {} });
     expect(await resolveWhatsAppPollVote(msg, deps)).toEqual({ kind: "completed" });
     const dir = resolveWhatsAppPollVoteFailureDir(env.stateDir);
     const files = await fs.readdir(dir);
@@ -288,39 +290,61 @@ describe("resolveWhatsAppPollVote", () => {
     const filePath = `${dir}/${files[0]}`;
     expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
     expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
-    const saved = JSON.parse(await fs.readFile(filePath, "utf8")) as WhatsAppPollVoteFailureCapture;
+    const fileText = await fs.readFile(filePath, "utf8");
+    const saved = JSON.parse(fileText) as WhatsAppPollVoteFailureCapture;
     const vote = msg.message?.pollUpdateMessage?.vote;
     expect(saved).toMatchObject({
       v: 1,
       accountId: "default",
       pollMessageId: "POLL1",
-      key: { id: "VOTE1", remoteJid: DM, fromMe: false },
-      pollCreationKey: { id: "POLL1", remoteJid: DM },
+      key: {
+        id: "VOTE1",
+        remoteJid: DM,
+        remoteJidAlt: DM_LID,
+        addressingMode: "pn",
+        fromMe: false,
+      },
+      update: {
+        pollCreationMessageKey: { id: "POLL1", remoteJid: DM },
+        metadata: {},
+        senderTimestampMs: 1_760_000_000_000,
+      },
       encPayload: { type: "Buffer", value: Buffer.from(vote?.encPayload ?? []).toString("base64") },
       encIv: { type: "Buffer", length: 12 },
-      senderTimestampMs: 1_760_000_000_000,
       creatorJids: [SELF_PN, SELF_LID],
-      voterJids: [DM],
+      voterJids: [DM, DM_LID],
     });
+    expect(saved.update).not.toHaveProperty("vote");
     const [, fields] = env.logger.warn.mock.calls[0] ?? [];
     expect(fields).toMatchObject({
+      chat: "pn",
+      creators: ["pn", "lid"],
+      voters: ["pn", "lid"],
       encPayloadType: "Buffer",
       encPayloadLength: saved.encPayload.length,
       encIvType: "Buffer",
       encIvLength: 12,
       captured: true,
     });
-    expect(fields.creators).toEqual([
-      expect.stringMatching(/^sha256:[0-9a-f]+@s\.whatsapp\.net$/),
-      expect.stringMatching(/^sha256:[0-9a-f]+@lid$/),
-    ]);
-    expect(fields.voters).toEqual([expect.stringMatching(/^sha256:[0-9a-f]+@s\.whatsapp\.net$/)]);
     const logged = JSON.stringify(env.logger.warn.mock.calls);
     for (const leak of [
       saved.encPayload.value as string,
       saved.encIv.value as string,
       "15550002222",
+      "88880002222",
+      "sha256:",
     ]) {
+      expect(logged).not.toContain(leak);
+    }
+    for (const leak of [
+      Buffer.from(SECRET).toString("base64"),
+      Buffer.from(SECRET).toString("hex"),
+      Buffer.from(SECRET).toString("latin1"),
+      JSON.stringify(Array.from(SECRET)).slice(1, -1),
+      "Pizza",
+      "Sushi",
+    ]) {
+      expect(fileText).not.toContain(leak);
       expect(logged).not.toContain(leak);
     }
   });
