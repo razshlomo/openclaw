@@ -1,5 +1,10 @@
+import fs from "node:fs/promises";
 import type { WAMessage } from "baileys";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  resolveWhatsAppPollVoteFailureDir,
+  type WhatsAppPollVoteFailureCapture,
+} from "../poll-vote-failure-capture.js";
 import {
   recordWhatsAppPoll,
   WHATSAPP_POLL_RECORD_STORES,
@@ -20,6 +25,7 @@ const SELF_PN = "15550000001@s.whatsapp.net";
 const SELF_LID = "77770000001@lid";
 const GROUP = "120363000000000001@g.us";
 const DM = "15550002222@s.whatsapp.net";
+const DM_LID = "88880002222@lid";
 const MEMBER = "15550003333@s.whatsapp.net";
 const SECRET = new Uint8Array(32).fill(7);
 const SELF = { jid: SELF_PN, lid: SELF_LID };
@@ -42,6 +48,7 @@ async function addPoll(params: {
   id?: string;
   origin: WhatsAppPollOrigin;
   chatJid: string;
+  chatJids?: string[];
   creatorJids?: string[];
 }) {
   await recordWhatsAppPoll(
@@ -49,7 +56,7 @@ async function addPoll(params: {
       account: ACCOUNT,
       pollMessageId: params.id ?? "POLL1",
       origin: params.origin,
-      chatJids: [params.chatJid],
+      chatJids: params.chatJids ?? [params.chatJid],
       creatorJids: params.creatorJids ?? (params.origin === "sent" ? [SELF_PN, SELF_LID] : [DM]),
       question: "Pizza or sushi?",
       secret: SECRET,
@@ -269,6 +276,102 @@ describe("resolveWhatsAppPollVote", () => {
       expect(logged).not.toContain(leak);
     }
     expect(await tallyRows("sent")).toEqual([]);
+  });
+
+  it("saves an undecryptable vote privately and logs only redacted candidates and sizes", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    const msg = voteMessage({ secret: new Uint8Array(32).fill(1) });
+    expect(await resolveWhatsAppPollVote(msg, deps)).toEqual({ kind: "completed" });
+    const dir = resolveWhatsAppPollVoteFailureDir(env.stateDir);
+    const files = await fs.readdir(dir);
+    expect(files).toHaveLength(1);
+    const filePath = `${dir}/${files[0]}`;
+    expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+    const saved = JSON.parse(await fs.readFile(filePath, "utf8")) as WhatsAppPollVoteFailureCapture;
+    const vote = msg.message?.pollUpdateMessage?.vote;
+    expect(saved).toMatchObject({
+      v: 1,
+      accountId: "default",
+      pollMessageId: "POLL1",
+      key: { id: "VOTE1", remoteJid: DM, fromMe: false },
+      pollCreationKey: { id: "POLL1", remoteJid: DM },
+      encPayload: { type: "Buffer", value: Buffer.from(vote?.encPayload ?? []).toString("base64") },
+      encIv: { type: "Buffer", length: 12 },
+      senderTimestampMs: 1_760_000_000_000,
+      creatorJids: [SELF_PN, SELF_LID],
+      voterJids: [DM],
+    });
+    const [, fields] = env.logger.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({
+      encPayloadType: "Buffer",
+      encPayloadLength: saved.encPayload.length,
+      encIvType: "Buffer",
+      encIvLength: 12,
+      captured: true,
+    });
+    expect(fields.creators).toEqual([
+      expect.stringMatching(/^sha256:[0-9a-f]+@s\.whatsapp\.net$/),
+      expect.stringMatching(/^sha256:[0-9a-f]+@lid$/),
+    ]);
+    expect(fields.voters).toEqual([expect.stringMatching(/^sha256:[0-9a-f]+@s\.whatsapp\.net$/)]);
+    const logged = JSON.stringify(env.logger.warn.mock.calls);
+    for (const leak of [
+      saved.encPayload.value as string,
+      saved.encIv.value as string,
+      "15550002222",
+    ]) {
+      expect(logged).not.toContain(leak);
+    }
+  });
+
+  it("keeps rejecting the vote when the failure cannot be saved", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    await fs.mkdir(`${env.stateDir}/whatsapp`, { recursive: true });
+    await fs.writeFile(resolveWhatsAppPollVoteFailureDir(env.stateDir), "not a directory");
+    const msg = voteMessage({ secret: new Uint8Array(32).fill(1) });
+    expect(await resolveWhatsAppPollVote(msg, deps)).toEqual({ kind: "completed" });
+    expect(env.logger.warn.mock.calls[0]?.[1]).toMatchObject({
+      reason: "decrypt-failed",
+      captured: false,
+      captureError: "EEXIST",
+    });
+  });
+
+  it("does not save votes rejected for any reason other than decryption", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    await resolveWhatsAppPollVote(voteMessage({ remoteJid: "15559999999@s.whatsapp.net" }), deps);
+    await expect(fs.readdir(resolveWhatsAppPollVoteFailureDir(env.stateDir))).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
+  });
+
+  it("tries the recorded direct-chat JIDs as voters when the vote arrives on the LID", async () => {
+    await addPoll({ origin: "sent", chatJid: DM_LID, chatJids: [DM_LID, DM] });
+    const msg = voteMessage({ remoteJid: DM_LID, voterJid: DM });
+    expect((await resolveWhatsAppPollVote(msg, deps)).kind).toBe("deliver");
+    expect(env.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("tries the resolver's number as a direct-chat voter", async () => {
+    await addPoll({ origin: "sent", chatJid: DM_LID });
+    const msg = voteMessage({ remoteJid: DM_LID, voterJid: DM });
+    const result = await resolveWhatsAppPollVote(msg, {
+      ...deps,
+      resolveInboundJid: async (jid) => (jid === DM_LID ? "+15550002222" : null),
+    });
+    expect(result.kind).toBe("deliver");
+    expect(env.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("does not try the chat JIDs as voters in a group", async () => {
+    await addPoll({ origin: "sent", chatJid: GROUP });
+    const msg = groupVote({ voterJid: GROUP });
+    expect(await resolveWhatsAppPollVote(msg, deps)).toEqual({ kind: "completed" });
+    expect(env.logger.warn.mock.calls[0]?.[1]).toMatchObject({
+      reason: "decrypt-failed",
+      attempts: 2,
+    });
   });
 
   it("rethrows a transient record read failure so the drain replays the vote", async () => {

@@ -6,6 +6,11 @@ import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import type { WhatsAppSelfIdentity } from "../identity.js";
 import { decodeWhatsAppPollVote } from "../poll-vote-decode.js";
 import {
+  describeWhatsAppPollVoteBytes,
+  pickWhatsAppPollVoteMessageKey,
+  saveWhatsAppPollVoteFailure,
+} from "../poll-vote-failure-capture.js";
+import {
   deleteWhatsAppPoll,
   isTransientWhatsAppPollStoreError,
   normalizeWhatsAppPollJids,
@@ -66,6 +71,59 @@ async function resolveVoterE164(
     }
   }
   return undefined;
+}
+
+/** Keeps the JID server (PN or LID) visible; the user part is hashed. */
+function redactPollJid(jid: string): string {
+  const server = jid.includes("@") ? jid.slice(jid.lastIndexOf("@") + 1) : "";
+  return `${redactIdentifier(jid)}@${server}`;
+}
+
+/** Saves the raw vote privately; the returned log fields hold only redacted JIDs and sizes. */
+async function captureDecryptFailure(params: {
+  msg: WAMessage;
+  update: proto.Message.IPollUpdateMessage;
+  accountId: string;
+  pollMessageId: string;
+  creatorJids: string[];
+  voterJids: string[];
+}): Promise<Record<string, unknown>> {
+  const encPayload = describeWhatsAppPollVoteBytes(params.update.vote?.encPayload);
+  const encIv = describeWhatsAppPollVoteBytes(params.update.vote?.encIv);
+  let captured = false;
+  let captureError: string | undefined;
+  try {
+    captured = Boolean(
+      await saveWhatsAppPollVoteFailure({
+        v: 1,
+        capturedAt: Date.now(),
+        accountId: params.accountId,
+        pollMessageId: params.pollMessageId,
+        key: pickWhatsAppPollVoteMessageKey(params.msg.key as WAMessageKeyWithAlt | undefined),
+        pollCreationKey: pickWhatsAppPollVoteMessageKey(
+          params.update.pollCreationMessageKey as WAMessageKeyWithAlt | undefined,
+        ),
+        encPayload,
+        encIv,
+        senderTimestampMs: params.update.senderTimestampMs ?? null,
+        messageTimestamp: params.msg.messageTimestamp ?? null,
+        creatorJids: params.creatorJids,
+        voterJids: params.voterJids,
+      }),
+    );
+  } catch (error) {
+    captureError = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown";
+  }
+  return {
+    creators: params.creatorJids.map(redactPollJid),
+    voters: params.voterJids.map(redactPollJid),
+    encPayloadType: encPayload.type,
+    encPayloadLength: encPayload.length,
+    encIvType: encIv.type,
+    encIvLength: encIv.length,
+    captured,
+    ...(captureError ? { captureError } : {}),
+  };
 }
 
 function buildDerivedVoteMessage(
@@ -138,6 +196,16 @@ export async function resolveWhatsAppPollVote(
         ? [key.participant, key.participantAlt]
         : [key.remoteJid, key.remoteJidAlt],
   );
+  const voterE164 = await resolveVoterE164(voterJids, deps.resolveInboundJid);
+  // In a direct chat the chat is the voter, so its recorded JIDs and number are voter candidates too.
+  const decryptVoterJids =
+    group || fromMe
+      ? voterJids
+      : normalizeWhatsAppPollJids([
+          ...voterJids,
+          ...record.chatJids,
+          voterE164 ? `${voterE164.slice(1)}@s.whatsapp.net` : undefined,
+        ]);
   const decoded = await decodeWhatsAppPollVote({
     record,
     vote: update.vote,
@@ -147,7 +215,7 @@ export async function resolveWhatsAppPollVote(
       (creationKey as WAMessageKeyWithAlt | undefined)?.participantAlt,
       ...selfJids,
     ],
-    voterJids,
+    voterJids: decryptVoterJids,
     chat: {
       remoteJid: key.remoteJid,
       remoteJidAlt: key.remoteJidAlt,
@@ -155,12 +223,24 @@ export async function resolveWhatsAppPollVote(
     },
   });
   if (!decoded.ok) {
+    const diagnostics =
+      decoded.reason === "decrypt-failed"
+        ? await captureDecryptFailure({
+            msg,
+            update,
+            accountId: deps.accountId,
+            pollMessageId,
+            creatorJids: decoded.creatorJids,
+            voterJids: decoded.voterJids,
+          })
+        : {};
     warnWhatsAppPollState("whatsapp poll vote rejected", {
       reason: decoded.reason,
       origin: record.origin,
       pollMessageId,
       chat: redactIdentifier(key.remoteJid ?? ""),
       attempts: decoded.attempts,
+      ...diagnostics,
     });
     return { kind: "completed" };
   }
@@ -174,7 +254,7 @@ export async function resolveWhatsAppPollVote(
       voter: {
         jids: voterJids,
         name: msg.pushName ?? undefined,
-        e164: await resolveVoterE164(voterJids, deps.resolveInboundJid),
+        e164: voterE164,
       },
       selected: decoded.selected,
       votedAtMs: normalizeWhatsAppPollVoteTimestampMs(
