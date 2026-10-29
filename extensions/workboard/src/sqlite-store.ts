@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { extractErrorCode } from "openclaw/plugin-sdk/error-runtime";
 import {
+  isSqliteWorkerStoreAvailable,
   openSqliteWorkerStore,
   runSqliteWorkerStoreOperation,
 } from "openclaw/plugin-sdk/sqlite-runtime";
@@ -27,11 +28,13 @@ export function createWorkboardSqliteStores(options: {
   const databasePath = path.resolve(
     options.dbPath ?? path.join(resolveStateDir(), "plugins", "workboard", "workboard.sqlite"),
   );
-  const worker = openSqliteWorkerStore<WorkboardSqliteWorkerOperations>({
-    moduleUrl: options.workerModuleUrl,
-    databasePath,
-    input: undefined,
-  });
+  const openWorker = () =>
+    openSqliteWorkerStore<WorkboardSqliteWorkerOperations>({
+      moduleUrl: options.workerModuleUrl,
+      databasePath,
+      input: undefined,
+    });
+  let worker = openWorker();
   let ownedConnection: number | undefined;
   let brokerClosed = false;
   let brokerCleanup = false;
@@ -69,18 +72,35 @@ export function createWorkboardSqliteStores(options: {
       ownedConnection = undefined;
     }
   }
-  const opened = worker
-    .then(async (store) => {
-      const result = await store.execute({ type: "connection.open", input: undefined });
-      if (result.ok) {
-        ownedConnection = result.value.connection;
-        return result.value;
-      }
-      ownedConnection = result.failure.cleanupConnection;
-      return unwrapWorkboardSqliteResult<WorkboardSqliteOperations["connection.open"]["output"]>(
-        result,
-      );
-    })
+  async function openConnection(store: Awaited<typeof worker>) {
+    const result = await store.execute({ type: "connection.open", input: undefined });
+    if (result.ok) {
+      ownedConnection = result.value.connection;
+      return result.value;
+    }
+    ownedConnection = result.failure.cleanupConnection;
+    return unwrapWorkboardSqliteResult<WorkboardSqliteOperations["connection.open"]["output"]>(
+      result,
+    );
+  }
+  // Temporary fork patch (openclaw/openclaw#169981): a failed broker slot never recovers, so drop it and
+  // reconnect once; the failed call still rejects. Drop when we run a release containing #170138.
+  let reopened = 0;
+  function reopen(failed: typeof worker) {
+    if (sealed || failed !== worker) {
+      return;
+    }
+    reopened += 1;
+    ownedConnection = undefined;
+    worker = failed
+      .then((store) => store.close())
+      .catch(() => undefined)
+      .then(openWorker);
+    opened = worker.then(openConnection);
+    opened.catch(() => {});
+  }
+  let opened = worker
+    .then(openConnection)
     .catch(async (error: unknown) => {
       openingFailure = { error };
       sealed = true;
@@ -135,10 +155,21 @@ export function createWorkboardSqliteStores(options: {
       throw new Error("Workboard SQLite connection is closed.");
     }
     const captured = structuredClone(args);
-    const pending = opened.then(({ connection }) => operation(connection, captured));
+    const current = worker;
+    const currentOpened = opened;
+    const pending = currentOpened.then(({ connection }) => operation(connection, captured));
     operations.add(pending);
     try {
       return await pending;
+    } catch (error) {
+      const available = await currentOpened.then(
+        () => current.then(isSqliteWorkerStoreAvailable),
+        () => false,
+      );
+      if (!available) {
+        reopen(current);
+      }
+      throw error;
     } finally {
       operations.delete(pending);
     }
@@ -162,7 +193,11 @@ export function createWorkboardSqliteStores(options: {
       }
     },
     ready,
-    dataVersion: () => run(undefined, (connection) => execute("dataVersion", { connection })),
+    // PRAGMA data_version is per connection; offset it so a reconnect always reads as an external change.
+    dataVersion: () =>
+      run(undefined, (connection) => execute("dataVersion", { connection })).then(
+        (version) => version + reopened * 1_000_000_000,
+      ),
     cards: {
       register: bindOperation((input) => execute("cards.register", input, true)),
       registerIfAbsent: bindOperation((input) => execute("cards.registerIfAbsent", input, true)),
