@@ -2,7 +2,7 @@ name: Build OpenClaw fork package
 
 on:
   push:
-    branches: [fork/2026.10.5]
+    branches: [fork/2026.10.7]
   workflow_dispatch:
 
 permissions:
