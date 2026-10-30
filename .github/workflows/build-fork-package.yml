@@ -1,0 +1,47 @@
+name: Build OpenClaw fork package
+
+on:
+  push:
+    branches: [fork/2026.10.7]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build validated self-contained package
+        run: node scripts/package-openclaw-for-docker.mjs --allow-unreleased-changelog --output-dir .artifacts/fork-package --output-name openclaw-fork-fixes.tgz
+      # WhatsApp is an external plugin (bundledDist: false), so it is packed the way
+      # plugin-npm-release.yml packs it for npm: runtime build, lock check, manifest overlay.
+      - name: Pack the WhatsApp external plugin
+        env:
+          OPENCLAW_PLUGIN_NPM_PACK_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/fork-whatsapp
+        run: bash scripts/plugin-npm-publish.sh --pack extensions/whatsapp
+      - run: sha256sum .artifacts/fork-package/openclaw-fork-fixes.tgz .artifacts/fork-whatsapp/*.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-fork-fixes-${{ github.sha }}
+          path: .artifacts/fork-package/openclaw-fork-fixes.tgz
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-whatsapp-fork-${{ github.sha }}
+          path: .artifacts/fork-whatsapp/*.tgz
+          if-no-files-found: error
+          retention-days: 30
