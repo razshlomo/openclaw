@@ -5,7 +5,8 @@ import {
   withSqliteWriteAdmissionService,
 } from "../../infra/sqlite-transaction.js";
 
-const COMMIT_DECISION_TIMEOUT_MS = 5_000;
+// Temporary fork patch (openclaw/openclaw#166634): drop when we run a release containing #168751 (v2026.10.10-beta.1+).
+const COMMIT_DECISION_TIMEOUT_MS = 60_000;
 const WAITING = 0;
 const REJECTED = 2;
 const COMMITTING = 3;
