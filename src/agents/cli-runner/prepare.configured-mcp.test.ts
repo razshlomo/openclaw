@@ -17,7 +17,10 @@ import { buildMcpToolSchema } from "../../gateway/mcp-http.schema.js";
 import type { CliBackendPlugin } from "../../plugins/cli-backend.types.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { resolveBundleMcpServerInstructions } from "../agent-bundle-mcp-instructions.js";
-import { setSessionMcpRuntimeScheduler } from "../agent-bundle-mcp-manager-api.js";
+import {
+  peekSessionMcpRuntime,
+  setSessionMcpRuntimeScheduler,
+} from "../agent-bundle-mcp-manager-api.js";
 import { disposeAllSessionMcpRuntimes } from "../agent-bundle-mcp-tools.js";
 import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import {
@@ -200,6 +203,7 @@ describe("configured MCP servers on exclusive CLI turns", () => {
         },
       };
       const turns = [];
+      const leasesAfterCleanup: Array<number | undefined> = [];
       const scheduler = createTestGatewayScheduler();
       try {
         await setSessionMcpRuntimeScheduler(scheduler);
@@ -267,6 +271,9 @@ describe("configured MCP servers on exclusive CLI turns", () => {
             });
           } finally {
             await context.preparedBackend.cleanup?.();
+            leasesAfterCleanup.push(
+              peekSessionMcpRuntime({ sessionId: sessionTarget.sessionId })?.activeLeases,
+            );
           }
         }
       } finally {
@@ -296,6 +303,8 @@ describe("configured MCP servers on exclusive CLI turns", () => {
           : turns[0],
       );
       expect(turns[2]).toEqual(turns[0]);
+      // A finished turn must release the configured servers so idle eviction can retire them.
+      expect(leasesAfterCleanup).toEqual(Array(3).fill(deny.length > 0 ? undefined : 0));
       expect(probeServer.calls).toBe(deny.length > 0 ? 0 : childAllow ? 2 : 3);
     },
   );
