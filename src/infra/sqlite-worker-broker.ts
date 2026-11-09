@@ -9,6 +9,7 @@ import {
   assertSqliteWorkerActorReusable,
   captureSqliteWorkerJobCustody,
   createSqliteWorkerAdmissionWarning,
+  createSqliteWorkerReopenBlockedError,
   captureSqliteWorkerOpen,
   captureSqliteWorkerRuntime,
   captureSqliteWorkerAdmissionPaths,
@@ -205,6 +206,11 @@ export class SqliteWorkerBroker {
     options.signal?.throwIfAborted();
     options.assertCurrent?.();
     let actor = this.actors.get(key);
+    if (actor?.slot.failed) {
+      // Retained sibling clients must not pin a failed actor to its dead slot.
+      await waitForSqliteWorkerOpen(this.lifecycle.retireActor(actor), options.signal);
+      return this.openAdmitted(options, client);
+    }
     let resumeScheduledMaintenance: (() => void) | undefined;
     if (actor?.retirementRequested || actor?.cleanupState === "pending") {
       const pending = actor.retirementRequested ? actor.retirement : actor.closing;
@@ -212,12 +218,7 @@ export class SqliteWorkerBroker {
         await waitForSqliteWorkerOpen(pending, options.signal);
         return this.openAdmitted(options, client);
       }
-      throw new SqliteWorkerError(
-        actor.retirementRequested
-          ? "SQLite actor retirement must finish before reopening"
-          : "SQLite worker cleanup is pending; retry close before reopening",
-        "closed",
-      );
+      throw createSqliteWorkerReopenBlockedError(actor);
     }
     if (actor) {
       if (options.runtimePreparation) {

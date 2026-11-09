@@ -19,6 +19,7 @@ import type {
   Job,
   SqliteWorkerOpenCustody,
 } from "./sqlite-worker-broker.types.js";
+import { SqliteWorkerError } from "./sqlite-worker-contract.js";
 import { readDatabasePathIdentity, type DatabasePathIdentity } from "./sqlite-worker-identity.js";
 import { createSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
 import {
@@ -338,6 +339,15 @@ function assertSqliteWorkerActorStateContext(
   if (actor.stateContext?.existingSchemaPath !== stateContext?.existingSchemaPath) {
     throw new Error("Shared-state worker schema policy changed; close its actor first");
   }
+}
+
+export function createSqliteWorkerReopenBlockedError(actor: Actor): SqliteWorkerError {
+  return new SqliteWorkerError(
+    actor.retirementRequested
+      ? "SQLite actor retirement must finish before reopening"
+      : "SQLite worker cleanup is pending; retry close before reopening",
+    "closed",
+  );
 }
 
 export function assertSqliteWorkerActorReusable(
