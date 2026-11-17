@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
-import type { WAMessage } from "baileys";
+import { proto, type WAMessage } from "baileys";
+import { createChannelIngressQueueForTests } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resolveWhatsAppPollVoteFailureDir,
@@ -18,8 +19,17 @@ import {
   installWhatsAppPollStateRuntimeForTest,
   type WhatsAppPollStateRuntimeForTest,
 } from "../poll-vote.test-helper.js";
+import {
+  createWhatsAppIngressMonitor,
+  type WhatsAppDurableInboundQueue,
+} from "./durable-receive.js";
 import { describeReplyContext } from "./extract.js";
-import { getWhatsAppPollVoteMeta, resolveWhatsAppPollVote } from "./poll-vote-inbound.js";
+import {
+  getWhatsAppPollVoteMeta,
+  resolveWhatsAppPollVote,
+  type WhatsAppPollVoteDeps,
+  type WhatsAppPollVoteResolution,
+} from "./poll-vote-inbound.js";
 
 const SELF_PN = "15550000001@s.whatsapp.net";
 const SELF_LID = "77770000001@lid";
@@ -50,6 +60,7 @@ async function addPoll(params: {
   chatJid: string;
   chatJids?: string[];
   creatorJids?: string[];
+  selectableCount?: number;
 }) {
   await recordWhatsAppPoll(
     {
@@ -61,7 +72,7 @@ async function addPoll(params: {
       question: "Pizza or sushi?",
       secret: SECRET,
       options: ["Pizza", "Sushi"],
-      selectableCount: 1,
+      selectableCount: params.selectableCount ?? 1,
     },
     { mode: "overwrite" },
   );
@@ -455,4 +466,237 @@ describe("resolveWhatsAppPollVote", () => {
       })) ?? [];
     expect(voter).toMatchObject({ e164: "+15550003333", name: "Dana" });
   });
+});
+
+/** The message as Baileys hands it over: a proto.Message, whose toJSON turns bytes into base64. */
+function asBaileys(msg: WAMessage): WAMessage {
+  return { ...msg, message: proto.Message.fromObject(msg.message ?? {}) };
+}
+
+function openIngressQueue(): WhatsAppDurableInboundQueue {
+  return createChannelIngressQueueForTests({
+    channelId: "whatsapp",
+    accountId: "acct",
+    stateDir: env.stateDir,
+  });
+}
+
+/** Admits each message to the real durable ingress queue and resolves what the drain replays. */
+async function resolveThroughIngress(
+  msgs: WAMessage[],
+  options: { queue?: WhatsAppDurableInboundQueue; deps?: WhatsAppPollVoteDeps } = {},
+) {
+  const replayed: WAMessage[] = [];
+  const results: WhatsAppPollVoteResolution[] = [];
+  const monitor = createWhatsAppIngressMonitor({
+    queue: options.queue ?? openIngressQueue(),
+    pollIntervalMs: 10,
+    dispatch: async ({ message }) => {
+      replayed.push(message);
+      results.push(await resolveWhatsAppPollVote(message, options.deps ?? deps));
+      return { kind: "completed" };
+    },
+  });
+  monitor.start();
+  try {
+    await monitor.waitForIdle();
+    for (const msg of msgs) {
+      await monitor.admit({ message: msg, receivedAt: 1 }, { receivedAt: 1 });
+      await monitor.waitForIdle();
+    }
+  } finally {
+    await monitor.stop();
+  }
+  return { replayed, results };
+}
+
+function replayedVote(msg: WAMessage | undefined) {
+  return msg?.message?.pollUpdateMessage?.vote;
+}
+
+function deliveredText(result: WhatsAppPollVoteResolution | undefined) {
+  return result?.kind === "deliver" ? result.message.message?.extendedTextMessage?.text : undefined;
+}
+
+describe("resolveWhatsAppPollVote after durable ingress", () => {
+  it.each([
+    {
+      name: "a single choice",
+      selectableCount: 1,
+      votes: [{ selectedOptions: ["Sushi"] }],
+      text: "Poll vote: Sushi",
+      selected: ["Sushi"],
+    },
+    {
+      name: "a multiple choice",
+      selectableCount: 0,
+      votes: [{ selectedOptions: ["Pizza", "Sushi"] }],
+      text: "Poll vote: Pizza, Sushi",
+      selected: ["Pizza", "Sushi"],
+    },
+    {
+      name: "a retraction",
+      selectableCount: 1,
+      votes: [
+        { selectedOptions: ["Sushi"], senderTimestampMs: 1000 },
+        { id: "VOTE2", selectedOptions: [], senderTimestampMs: 2000 },
+      ],
+      text: "Poll vote removed",
+      selected: [],
+    },
+  ])("decodes $name whose bytes came back from the queue as base64", async (scenario) => {
+    await addPoll({ origin: "sent", chatJid: DM, selectableCount: scenario.selectableCount });
+    const { replayed, results } = await resolveThroughIngress(
+      scenario.votes.map((vote) => asBaileys(voteMessage(vote))),
+    );
+    // The fixture reproduces the bug only if the queue really handed back strings.
+    for (const msg of replayed) {
+      expect(typeof replayedVote(msg)?.encPayload).toBe("string");
+      expect(typeof replayedVote(msg)?.encIv).toBe("string");
+    }
+    expect(env.logger.warn).not.toHaveBeenCalled();
+    expect(results).toHaveLength(scenario.votes.length);
+    expect(deliveredText(results.at(-1))).toBe(scenario.text);
+    expect((await tallyRows("sent")).map((row) => row.value)).toEqual([
+      expect.objectContaining({ voterJids: [DM], selected: scenario.selected }),
+    ]);
+  });
+
+  it("decodes a group vote from the queue and completes without waking anyone", async () => {
+    await addPoll({ origin: "sent", chatJid: GROUP });
+    const { results } = await resolveThroughIngress([asBaileys(groupVote())]);
+    expect(results).toEqual([{ kind: "completed" }]);
+    expect((await tallyRows("sent")).map((row) => row.key)).toEqual([`${PREFIX}POLL1:${MEMBER}`]);
+    expect(env.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a late older vote stale after the queue", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    const { results } = await resolveThroughIngress([
+      asBaileys(voteMessage({ senderTimestampMs: 5000 })),
+      asBaileys(voteMessage({ id: "VOTE2", selectedOptions: ["Pizza"], senderTimestampMs: 4000 })),
+    ]);
+    expect(results.map((result) => result.kind)).toEqual(["deliver", "completed"]);
+    expect((await tallyRows("sent")).map((row) => row.value)).toEqual([
+      expect.objectContaining({ selected: ["Sushi"], votedAtMs: 5000 }),
+    ]);
+    expect(env.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("resolves a duplicate admission of the same vote once", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    const vote = asBaileys(voteMessage());
+    const { results } = await resolveThroughIngress([vote, vote]);
+    expect(results.map((result) => result.kind)).toEqual(["deliver"]);
+    expect(await tallyRows("sent")).toHaveLength(1);
+  });
+
+  it("counts a vote once when the queue replays it after a transient write failure", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    env.faults.push({
+      namespace: WHATSAPP_POLL_TALLY_STORES.sent.namespace,
+      method: "register",
+      code: "PLUGIN_STATE_WRITE_FAILED",
+      once: true,
+    });
+    const queue = openIngressQueue();
+    const first = await resolveThroughIngress([asBaileys(voteMessage())], { queue });
+    // Past the retry backoff, a restarted monitor drains what the first one released.
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 10 * 60_000);
+    const second = await resolveThroughIngress([], { queue });
+    const results = [...first.results, ...second.results];
+    expect(first.replayed.length + second.replayed.length).toBeGreaterThanOrEqual(2);
+    expect(results.map((result) => result.kind)).toEqual(["deliver"]);
+    expect((await tallyRows("sent")).map((row) => row.value)).toEqual([
+      expect.objectContaining({ selected: ["Sushi"], votedAtMs: 1_760_000_000_000 }),
+    ]);
+  });
+
+  it("rejects a vote from another chat without decrypting or saving it", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    const { results } = await resolveThroughIngress([
+      asBaileys(voteMessage({ remoteJid: "15559999999@s.whatsapp.net" })),
+    ]);
+    expect(results).toEqual([{ kind: "completed" }]);
+    expect(env.logger.warn.mock.calls[0]?.[1]).toMatchObject({
+      reason: "chat-mismatch",
+      attempts: 0,
+    });
+    await expect(fs.readdir(resolveWhatsAppPollVoteFailureDir(env.stateDir))).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
+    expect(await tallyRows("sent")).toEqual([]);
+  });
+
+  it("ignores a queued vote on a poll another phone recorded under the same account", async () => {
+    await addPoll({ origin: "sent", chatJid: DM });
+    const relinked = { accountId: "default", self: { jid: "15550009999@s.whatsapp.net" } };
+    const { results } = await resolveThroughIngress([asBaileys(voteMessage())], {
+      deps: relinked,
+    });
+    expect(results).toEqual([{ kind: "completed" }]);
+    expect(await tallyRows("sent")).toEqual([]);
+    expect(env.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "a wrong key",
+      msg: () => asBaileys(voteMessage({ secret: new Uint8Array(32).fill(1) })),
+      attempts: 2,
+      encPayloadType: "string",
+    },
+    {
+      name: "a malformed payload",
+      msg: () => {
+        const msg = voteMessage();
+        const vote = msg.message?.pollUpdateMessage?.vote;
+        // A plain object keeps the string as is through the queue.
+        Object.assign(vote ?? {}, { encPayload: "@@@@" });
+        return msg;
+      },
+      attempts: 0,
+      encPayloadType: "string",
+    },
+  ])(
+    "rejects $name without a message, saves it privately and logs no identifiers",
+    async (scenario) => {
+      await addPoll({ origin: "sent", chatJid: DM });
+      const { replayed, results } = await resolveThroughIngress([scenario.msg()]);
+      expect(results).toEqual([{ kind: "completed" }]);
+      expect(env.logger.warn).toHaveBeenCalledTimes(1);
+      const [message, fields] = env.logger.warn.mock.calls[0] ?? [];
+      expect(message).toBe("whatsapp poll vote rejected");
+      expect(fields).toMatchObject({
+        reason: "decrypt-failed",
+        attempts: scenario.attempts,
+        encPayloadType: scenario.encPayloadType,
+        captured: true,
+      });
+      const dir = resolveWhatsAppPollVoteFailureDir(env.stateDir);
+      const files = await fs.readdir(dir);
+      expect(files).toHaveLength(1);
+      expect((await fs.stat(`${dir}/${files[0]}`)).mode & 0o777).toBe(0o600);
+      expect(await tallyRows("sent")).toEqual([]);
+      const vote = replayedVote(replayed[0]);
+      const asText = (value: unknown) =>
+        value instanceof Uint8Array ? Buffer.from(value).toString("base64") : String(value);
+      const logged = JSON.stringify(env.logger.warn.mock.calls);
+      for (const leak of [
+        asText(vote?.encPayload),
+        asText(vote?.encIv),
+        "15550002222",
+        Buffer.from(SECRET).toString("base64"),
+        Buffer.from(SECRET).toString("hex"),
+        Buffer.from(SECRET).toString("latin1"),
+        JSON.stringify(Array.from(SECRET)).slice(1, -1),
+        "Pizza",
+        "Sushi",
+        "Dana",
+      ]) {
+        expect(logged).not.toContain(leak);
+      }
+    },
+  );
 });
