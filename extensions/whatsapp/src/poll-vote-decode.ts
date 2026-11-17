@@ -65,6 +65,22 @@ async function chatMatchesRecord(
 }
 
 /**
+ * Durable ingress stores the proto message through its toJSON, so the vote's
+ * bytes come back as base64 strings. Only canonical padded base64 is accepted:
+ * Buffer.from skips invalid characters silently.
+ */
+function readPollVoteBytes(value: unknown): Uint8Array | undefined {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (typeof value !== "string" || value === "") {
+    return undefined;
+  }
+  const bytes = Buffer.from(value, "base64");
+  return bytes.toString("base64") === value ? bytes : undefined;
+}
+
+/**
  * The vote key binds the poll id, the creator JID and the voter JID exactly as
  * the voting client saw them (PN or LID), so every normalized pairing is tried.
  * GCM authenticates, so a wrong pairing fails instead of decoding garbage.
@@ -80,8 +96,8 @@ export async function decodeWhatsAppPollVote(params: {
   if (!(await chatMatchesRecord(params.record, params.chat))) {
     return { ok: false, reason: "chat-mismatch", attempts: 0 };
   }
-  const encPayload = params.vote?.encPayload;
-  const encIv = params.vote?.encIv;
+  const encPayload = readPollVoteBytes(params.vote?.encPayload);
+  const encIv = readPollVoteBytes(params.vote?.encIv);
   const creators = normalizeWhatsAppPollJids([...params.record.creatorJids, ...params.creatorJids]);
   const voters = normalizeWhatsAppPollJids(params.voterJids);
   const pollEncKey = Buffer.from(params.record.secret, "base64");

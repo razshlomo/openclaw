@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { proto } from "baileys";
 import { describe, expect, it, vi } from "vitest";
 import { decodeWhatsAppPollVote } from "./poll-vote-decode.js";
 import type { WhatsAppPollRecord } from "./poll-vote-store.js";
@@ -159,5 +160,78 @@ describe("decodeWhatsAppPollVote", () => {
       });
     expect(await decode(["Pizza", "Burger"])).toEqual({ ok: true, selected: ["Pizza"] });
     expect(await decode(["Burger"])).toEqual({ ok: false, reason: "unknown-options", attempts: 1 });
+  });
+
+  // Durable ingress hands bytes back as base64 strings; a test casts them past the proto type.
+  const decodeRaw = (vote: Record<string, unknown> | null) =>
+    decodeWhatsAppPollVote({
+      record: record(),
+      vote: vote as proto.Message.IPollEncValue | null,
+      pollMessageId: "POLL1",
+      creatorJids: [],
+      voterJids: [VOTER_PN],
+      chat: { remoteJid: GROUP },
+    });
+
+  it.each([{ selected: ["Sushi"] }, { selected: ["Pizza", "Salad"] }, { selected: [] }])(
+    "decodes $selected the same from Buffer, Uint8Array and base64",
+    async ({ selected }) => {
+      const vote = encrypt(AGENT_PN, VOTER_PN, selected);
+      const forms = [
+        (bytes: Buffer) => bytes,
+        (bytes: Buffer) => new Uint8Array(bytes),
+        (bytes: Buffer) => bytes.toString("base64"),
+      ];
+      const results = await Promise.all(
+        forms.map((form) =>
+          decodeRaw({ encPayload: form(vote.encPayload), encIv: form(vote.encIv) }),
+        ),
+      );
+      expect(results).toEqual([
+        { ok: true, selected },
+        { ok: true, selected },
+        { ok: true, selected },
+      ]);
+    },
+  );
+
+  const valid = encrypt(AGENT_PN, VOTER_PN, ["Pizza"]);
+  const payload64 = valid.encPayload.toString("base64");
+  const iv64 = valid.encIv.toString("base64");
+  it.each([
+    ["no vote", null],
+    ["a missing payload", { encIv: valid.encIv }],
+    ["a null payload", { encPayload: null, encIv: valid.encIv }],
+    ["an empty payload", { encPayload: "", encIv: iv64 }],
+    ["a non-base64 payload", { encPayload: "@@@@", encIv: iv64 }],
+    ["a base64url payload", { encPayload: `-_${payload64.slice(2)}`, encIv: iv64 }],
+    ["an unpadded payload", { encPayload: payload64.replace(/=+$/, ""), encIv: iv64 }],
+    ["a numeric payload", { encPayload: 42, encIv: iv64 }],
+    ["an object payload", { encPayload: { type: "Buffer", data: payload64 }, encIv: iv64 }],
+    ["a missing IV", { encPayload: payload64 }],
+    ["a non-base64 IV", { encPayload: payload64, encIv: "@@@@" }],
+    ["an IV with stray characters", { encPayload: payload64, encIv: `${iv64} ` }],
+  ])("rejects %s without trying to decrypt", async (_label, vote) => {
+    await expect(decodeRaw(vote)).resolves.toMatchObject({
+      ok: false,
+      reason: "decrypt-failed",
+      attempts: 0,
+    });
+  });
+
+  it("still tries every pairing for well-formed base64 under a wrong secret", async () => {
+    const vote = encrypt(AGENT_PN, VOTER_PN, ["Pizza"], randomBytes(32));
+    expect(
+      await decodeRaw({
+        encPayload: vote.encPayload.toString("base64"),
+        encIv: vote.encIv.toString("base64"),
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "decrypt-failed",
+      attempts: 2,
+      creatorJids: [AGENT_PN, AGENT_LID],
+      voterJids: [VOTER_PN],
+    });
   });
 });
