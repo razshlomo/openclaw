@@ -149,6 +149,7 @@ export async function createWhatsAppPollStateForTest() {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   return {
     env: state.env,
+    stateDir: state.stateDir,
     faults,
     logger,
     opened,
@@ -168,7 +169,12 @@ export async function createWhatsAppPollStateForTest() {
 /** Installs a WhatsApp runtime whose keyed stores are the real store above. */
 export async function installWhatsAppPollStateRuntimeForTest() {
   const pollState = await createWhatsAppPollStateForTest();
-  const runtime = createPluginRuntimeMock({ state: { openKeyedStore: pollState.openKeyedStore } });
+  const runtime = createPluginRuntimeMock({
+    state: {
+      openKeyedStore: pollState.openKeyedStore,
+      resolveStateDir: () => pollState.stateDir,
+    },
+  });
   vi.spyOn(runtime.logging, "getChildLogger").mockReturnValue(
     pollState.logger as unknown as ReturnType<typeof runtime.logging.getChildLogger>,
   );

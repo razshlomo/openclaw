@@ -124,7 +124,13 @@ describe("decodeWhatsAppPollVote", () => {
       voterJids: [VOTER_PN, VOTER_LID],
       chat: { remoteJid: GROUP },
     });
-    expect(result).toEqual({ ok: false, reason: "decrypt-failed", attempts: 4 });
+    expect(result).toEqual({
+      ok: false,
+      reason: "decrypt-failed",
+      attempts: 4,
+      creatorJids: [AGENT_PN, AGENT_LID],
+      voterJids: [VOTER_PN, VOTER_LID],
+    });
   });
 
   it("decodes multiple selections and an empty retraction", async () => {

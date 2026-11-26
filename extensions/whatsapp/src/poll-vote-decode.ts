@@ -7,7 +7,18 @@ export type WhatsAppPollVoteRejectReason = "chat-mismatch" | "decrypt-failed" | 
 
 export type WhatsAppPollVoteDecodeResult =
   | { ok: true; selected: string[] }
-  | { ok: false; reason: WhatsAppPollVoteRejectReason; attempts: number };
+  | {
+      ok: false;
+      reason: "decrypt-failed";
+      attempts: number;
+      creatorJids: string[];
+      voterJids: string[];
+    }
+  | {
+      ok: false;
+      reason: Exclude<WhatsAppPollVoteRejectReason, "decrypt-failed">;
+      attempts: number;
+    };
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -93,7 +104,13 @@ export async function decodeWhatsAppPollVote(params: {
     }
   }
   if (!hashes) {
-    return { ok: false, reason: "decrypt-failed", attempts };
+    return {
+      ok: false,
+      reason: "decrypt-failed",
+      attempts,
+      creatorJids: creators,
+      voterJids: voters,
+    };
   }
   const byHash = new Map(params.record.options.map((option) => [hashOption(option), option]));
   const selected = hashes
