@@ -1,3 +1,4 @@
+import { createPluginStateKeyedStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WhatsAppIngressPermanentError } from "./inbound/durable-payload.js";
 import {
@@ -6,9 +7,11 @@ import {
   recordWhatsAppPoll,
   WHATSAPP_POLL_CHAT_INDEX_STORES,
   WHATSAPP_POLL_RECORD_STORES,
+  WHATSAPP_POLL_TALLY_STORES,
   WHATSAPP_POLL_TTL_MS,
   type WhatsAppPollRecordInput,
 } from "./poll-vote-store.js";
+import { applyWhatsAppPollVote, readWhatsAppPollTally } from "./poll-vote-tally-store.js";
 import {
   installWhatsAppPollStateRuntimeForTest,
   type WhatsAppPollStateRuntimeForTest,
@@ -85,6 +88,51 @@ describe("WhatsApp poll record store", () => {
     const receivedRows = await env.openStore(WHATSAPP_POLL_RECORD_STORES.received).entries();
     expect(sentRows.map((row) => row.key)).toEqual([`${PREFIX}POLL1`]);
     expect(receivedRows.map((row) => row.key)).toEqual([`${PREFIX}POLL2`]);
+  });
+
+  it("reads polls, index rows and tallies that the legacy keyed store wrote", async () => {
+    // 2026.10.7 wrote these namespaces through openKeyedStore (V1); 11.5 reads through V2.
+    expect(await recordWhatsAppPoll(pollInput(), { mode: "overwrite" })).toBe(true);
+    const written = await readWhatsAppPollRecord(ACCOUNT, "POLL1");
+    if (!written) {
+      throw new Error("poll was not recorded");
+    }
+    await applyWhatsAppPollVote({
+      record: written,
+      account: ACCOUNT,
+      pollMessageId: "POLL1",
+      voter: { jids: ["15550003333@s.whatsapp.net"], name: "Dana" },
+      selected: ["Sushi"],
+      votedAtMs: Date.now(),
+    });
+    let moved = 0;
+    for (const options of [
+      WHATSAPP_POLL_RECORD_STORES.sent,
+      WHATSAPP_POLL_CHAT_INDEX_STORES.sent,
+      WHATSAPP_POLL_TALLY_STORES.sent,
+    ]) {
+      const rows = await env.openStore(options).entries();
+      await env.openStore(options).clear();
+      const legacy = createPluginStateKeyedStoreForTests<unknown>("whatsapp", {
+        ...options,
+        env: env.env,
+      });
+      for (const row of rows) {
+        await legacy.register(row.key, row.value, {
+          ttlMs: (row.expiresAt ?? Date.now() + WHATSAPP_POLL_TTL_MS) - Date.now(),
+        });
+        moved++;
+      }
+    }
+    expect(moved).toBe(3);
+
+    expect(await readWhatsAppPollRecord(ACCOUNT, "POLL1")).toEqual(written);
+    expect(
+      await listWhatsAppChatPollIds({ account: ACCOUNT, chatJids: [HOME], limit: 3 }),
+    ).toMatchObject([{ pollMessageId: "POLL1" }]);
+    expect(
+      await readWhatsAppPollTally({ record: written, account: ACCOUNT, pollMessageId: "POLL1" }),
+    ).toMatchObject([{ name: "Dana", selected: ["Sushi"] }]);
   });
 
   it("(a) keeps an old sent poll readable after 2001 incoming polls", async () => {
