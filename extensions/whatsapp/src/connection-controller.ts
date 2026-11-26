@@ -35,6 +35,7 @@ import {
 const LOGGED_OUT_STATUS = 401;
 const POST_PAIRING_RESTART_STATUS = 515;
 const TIMED_OUT_STATUS = 408;
+const SHUTDOWN_CREDS_DRAIN_GRACE_MS = 60_000;
 const WHATSAPP_LOGIN_RESTART_MESSAGE =
   "WhatsApp asked for a restart after pairing (code 515); waiting for creds to save…";
 const WHATSAPP_LOGIN_TIMEOUT_RESTART_MESSAGE =
@@ -817,8 +818,19 @@ export class WhatsAppConnectionController {
     this.stopDisconnectRetries();
     await this.connectionSetupPromise?.catch(() => {});
     await this.connectionOwnerLeasePromise?.catch(() => {});
-    await this.closeCurrentConnection();
-    await this.finishPendingSocketCleanup();
+    // A restart builds a new controller and never retries this cleanup, so a
+    // cleanup failure must not keep the owner lease: give the creds queue one
+    // last bounded wait, release, then report the original failure.
+    let cleanupError: unknown;
+    let cleanupFailed = false;
+    try {
+      await this.closeCurrentConnection();
+      await this.finishPendingSocketCleanup();
+    } catch (error) {
+      cleanupError = error;
+      cleanupFailed = true;
+      await waitForCredsSaveQueueWithTimeout(this.authDir, SHUTDOWN_CREDS_DRAIN_GRACE_MS);
+    }
     try {
       this.runtimeContextLease?.dispose();
     } finally {
@@ -838,6 +850,9 @@ export class WhatsAppConnectionController {
           this.retainedOwnerReleaseLease = null;
         }
       }
+    }
+    if (cleanupFailed) {
+      throw cleanupError;
     }
   }
 

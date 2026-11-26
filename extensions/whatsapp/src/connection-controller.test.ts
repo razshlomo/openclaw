@@ -551,13 +551,15 @@ describe("WhatsAppConnectionController", () => {
     expect(connectionOwnerMocks.release).toHaveBeenCalledOnce();
   });
 
+  // A restart builds a new controller and never retries this cleanup, so a lease
+  // kept after a cleanup failure blocks every later connection ("Another process owns").
   it.each([
-    ["transport", "socket close could not be confirmed", 0],
-    ["credentials", "credential persistence did not drain", 0],
-    ["release", "owner release failed", 1],
+    ["transport", "socket close could not be confirmed", 1, 1],
+    ["credentials", "credential persistence did not drain", 1, 1],
+    ["release", "owner release failed", 1, 2],
   ] as const)(
-    "retains ownership after %s failure until cleanup can retry",
-    async (stage, message, releases) => {
+    "releases ownership after %s failure and still reports it",
+    async (stage, message, releasesAfterFailure, releasesAfterRetry) => {
       const sock = createSocketWithTransportEmitter();
       if (stage === "transport") {
         sock.end.mockRejectedValueOnce(new Error("end failed"));
@@ -574,16 +576,23 @@ describe("WhatsAppConnectionController", () => {
       queueConnectedSocket(sock);
       await open(`cleanup-${stage}`);
       await expect(controller.shutdown()).rejects.toThrow(message);
-      expect(connectionOwnerMocks.release).toHaveBeenCalledTimes(releases);
+      expect(connectionOwnerMocks.release).toHaveBeenCalledTimes(releasesAfterFailure);
       if (stage !== "transport") {
         expect(controller.getActiveListener()).toBeNull();
         expect(controller.getCurrentSock()).toBeNull();
+      }
+      if (stage !== "release") {
+        // The failed cleanup still gives the creds queue a last minute before release.
+        expect(waitForCredsSaveQueueWithTimeoutMock).toHaveBeenLastCalledWith(
+          "/tmp/wa-auth",
+          60_000,
+        );
       }
       if (stage === "credentials") {
         expect(sock.end).toHaveBeenCalledOnce();
       }
       await expect(controller.shutdown()).resolves.toBeUndefined();
-      expect(connectionOwnerMocks.release).toHaveBeenCalledTimes(releases + 1);
+      expect(connectionOwnerMocks.release).toHaveBeenCalledTimes(releasesAfterRetry);
     },
   );
 
