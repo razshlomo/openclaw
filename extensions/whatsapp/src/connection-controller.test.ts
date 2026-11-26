@@ -5,7 +5,6 @@ import path from "node:path";
 import { DisconnectReason } from "baileys";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  closeWaSocket,
   waitForWhatsAppLoginResult,
   WhatsAppConnectionController,
 } from "./connection-controller.js";
@@ -18,6 +17,7 @@ import {
   waitForCredsSaveQueueWithTimeout,
   waitForWaConnection,
 } from "./session.js";
+import { closeWaSocket } from "./socket-close.js";
 import { DEFAULT_WHATSAPP_SOCKET_TIMING } from "./socket-timing.js";
 
 vi.mock("./session.js", async () => {

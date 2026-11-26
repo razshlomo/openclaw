@@ -16,7 +16,10 @@ import { createTestWebInboundMessage } from "./test-message.test-helper.js";
 const pollVoteMetaMock = vi.hoisted(() =>
   vi.fn<(msg: object) => { pollMessageId: string } | undefined>(() => undefined),
 );
-vi.mock("./poll-vote-inbound.js", () => ({ getWhatsAppPollVoteMeta: pollVoteMetaMock }));
+vi.mock("./poll-vote-inbound.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./poll-vote-inbound.js")>()),
+  getWhatsAppPollVoteMeta: pollVoteMetaMock,
+}));
 
 setupAccessControlTestHarness();
 let authorize: typeof import("../inbound-policy.js").resolveWhatsAppCommandAuthorized;

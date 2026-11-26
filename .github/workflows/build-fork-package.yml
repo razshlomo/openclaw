@@ -23,7 +23,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # WhatsApp is an external plugin (bundledDist: false), so it is packed the way

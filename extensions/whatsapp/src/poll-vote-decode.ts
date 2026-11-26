@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { decryptPollVote, type proto } from "baileys";
 import { normalizeWhatsAppPollJids, type WhatsAppPollRecord } from "./poll-vote-store.js";
 
-export type WhatsAppPollVoteRejectReason = "chat-mismatch" | "decrypt-failed" | "unknown-options";
+type WhatsAppPollVoteRejectReason = "chat-mismatch" | "decrypt-failed" | "unknown-options";
 
 export type WhatsAppPollVoteDecodeResult =
   | { ok: true; selected: string[] }

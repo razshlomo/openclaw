@@ -15,7 +15,7 @@ import { getOptionalWhatsAppRuntime } from "./runtime.js";
 export type WhatsAppPollOrigin = "sent" | "received";
 
 /** The linked phone a poll was recorded under; never the reusable account slot. */
-export type WhatsAppPollOwner = { e164?: string; jid?: string; lid?: string };
+type WhatsAppPollOwner = { e164?: string; jid?: string; lid?: string };
 
 /**
  * Where poll state lives: the configured account plus the phone currently
@@ -153,6 +153,7 @@ export function truncateUtf8(value: string, maxBytes: number): string {
 }
 
 export function readPluginStateErrorCode(error: unknown): string | undefined {
+  // SAFETY: only the optional `code` is read, and its type is checked below.
   const code = (error as { code?: unknown } | null | undefined)?.code;
   return typeof code === "string" ? code : undefined;
 }
@@ -232,7 +233,7 @@ export function normalizeWhatsAppPollMessageId(
 }
 
 /** Device suffixes differ per client; storage and comparisons use the bare user JID. */
-export function normalizeWhatsAppPollJid(value: string | null | undefined): string | undefined {
+function normalizeWhatsAppPollJid(value: string | null | undefined): string | undefined {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!trimmed) {
     return undefined;
@@ -271,7 +272,7 @@ export function buildWhatsAppKeyPrefixRange(prefix: string, limit: number) {
 }
 
 /** Every key starts with this; the account id is encoded so it never contains ":". */
-export function buildWhatsAppPollAccountPrefix(accountId: string): string {
+function buildWhatsAppPollAccountPrefix(accountId: string): string {
   return `${encodeURIComponent(accountId)}:`;
 }
 
@@ -279,7 +280,7 @@ export function buildWhatsAppPollAccountPrefix(accountId: string): string {
  * E.164 first: it survives device suffixes and a newly learned LID, so the same
  * phone keeps its polls across restarts and reconnects.
  */
-export function resolveWhatsAppPollOwnerKey(
+function resolveWhatsAppPollOwnerKey(
   self: WhatsAppSelfIdentity | null | undefined,
 ): string | undefined {
   const identity = resolveComparableIdentity(self);
@@ -325,6 +326,7 @@ export function buildWhatsAppPollTallyPrefix(
 }
 
 function isPollOwner(value: unknown): value is WhatsAppPollOwner {
+  // SAFETY: a guard; every field is type-checked before the predicate holds.
   const owner = value as Record<string, unknown> | null | undefined;
   return (
     typeof owner === "object" &&
@@ -334,6 +336,7 @@ function isPollOwner(value: unknown): value is WhatsAppPollOwner {
 }
 
 function isPollRecord(value: unknown): value is WhatsAppPollRecord {
+  // SAFETY: a guard; every field is type-checked before the predicate holds.
   const record = value as Partial<WhatsAppPollRecord> | null | undefined;
   return (
     record?.v === 2 &&

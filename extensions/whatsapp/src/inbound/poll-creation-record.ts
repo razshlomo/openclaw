@@ -13,7 +13,7 @@ import {
 } from "../poll-vote-store.js";
 import { findWhatsAppPollCreation } from "./poll-creation.js";
 
-export type WhatsAppInboundPollRecordData = {
+type WhatsAppInboundPollRecordData = {
   chatJids: string[];
   creatorJids: string[];
   creatorName?: string;
@@ -83,6 +83,7 @@ export function extractWhatsAppInboundPollRecord(
   if (!secret) {
     return { missingSecret: true };
   }
+  // SAFETY: Baileys sets the *Alt fields at runtime without typing them; every field read is optional.
   const key = (msg.key ?? {}) as WAMessageKeyWithAlt;
   const chatJids = normalizeWhatsAppPollJids([key.remoteJid, key.remoteJidAlt]);
   const isGroup = Boolean(key.remoteJid && isJidGroup(key.remoteJid));

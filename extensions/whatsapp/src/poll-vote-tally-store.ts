@@ -66,7 +66,11 @@ function toPositiveFiniteNumber(value: unknown): number | undefined {
     numeric = value;
   } else if (typeof value === "string" || typeof value === "bigint") {
     numeric = Number(value);
-  } else if (typeof (value as { toNumber?: unknown } | null)?.toNumber === "function") {
+  } else if (
+    // SAFETY: protobuf Long values carry toNumber(); its type is checked before the call.
+    typeof (value as { toNumber?: unknown } | null)?.toNumber === "function"
+  ) {
+    // SAFETY: the branch condition proved toNumber is a function.
     numeric = (value as { toNumber: () => number }).toNumber();
   }
   return numeric !== undefined && Number.isFinite(numeric) && numeric > 0 ? numeric : undefined;
@@ -77,6 +81,7 @@ function resolveVoterKey(voterJids: readonly string[]): string | undefined {
 }
 
 function isTallyValue(value: unknown): value is WhatsAppPollTallyValue {
+  // SAFETY: a guard; every field is type-checked before the predicate holds.
   const tally = value as Partial<WhatsAppPollTallyValue> | null | undefined;
   return (
     tally?.v === 1 &&
