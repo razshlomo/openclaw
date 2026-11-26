@@ -10,6 +10,7 @@ import { buildWhatsAppInboundAdmission } from "./admission.js";
 import { isRecentOutboundMessage } from "./dedupe.js";
 import { hasInboundUserContent } from "./extract.js";
 import type { WhatsAppGroupMetadataCacheOwner } from "./group-metadata-cache.js";
+import { getWhatsAppPollVoteMeta } from "./poll-vote-inbound.js";
 import { isJidGroup } from "./runtime-api.js";
 import type { WhatsAppAttachedSocketSession } from "./socket-session.js";
 
@@ -107,9 +108,11 @@ export function createWhatsAppInboundMessageNormalizer(options: {
       accountId: options.accountId,
       selfE164,
     });
+    // Poll votes are derived messages the sender did not type: never send a pairing prompt.
     const suppressPairingReply =
-      messageTimestampMs !== undefined &&
-      messageTimestampMs < connectedAtMs - PAIRING_REPLY_HISTORY_GRACE_MS;
+      Boolean(getWhatsAppPollVoteMeta(msg)) ||
+      (messageTimestampMs !== undefined &&
+        messageTimestampMs < connectedAtMs - PAIRING_REPLY_HISTORY_GRACE_MS);
 
     warnMissingProviderGroupPolicyFallbackOnce({
       providerMissingFallbackApplied: policy.providerMissingFallbackApplied,

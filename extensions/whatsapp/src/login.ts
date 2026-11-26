@@ -5,9 +5,10 @@ import { captureRuntimeConfigAsyncReader } from "openclaw/plugin-sdk/runtime-con
 import { danger, success, defaultRuntime, type RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { resolveWhatsAppAccount } from "./accounts.js";
 import { restoreCredsFromBackupIfNeeded } from "./auth-store.js";
-import { closeWaSocket, waitForWhatsAppLoginResult } from "./connection-controller.js";
+import { waitForWhatsAppLoginResult } from "./connection-controller.js";
 import { renderQrTerminal } from "./qr-terminal.js";
 import { createWaSocket, waitForWaConnection } from "./session.js";
+import { closeWaSocket } from "./socket-close.js";
 import { resolveWhatsAppSocketTiming } from "./socket-timing.js";
 
 const QR_LINK_INSTRUCTION = "Open the WhatsApp app, go to Linked Devices, then scan this QR:";
@@ -98,6 +99,7 @@ export async function loginWeb(
   logInfo("Waiting for WhatsApp connection...", runtime);
   try {
     const result = await waitForWhatsAppLoginResult({
+      accountId: account.accountId,
       sock,
       authDir: account.authDir,
       isLegacyAuthDir: account.isLegacyAuthDir,

@@ -26,7 +26,7 @@ import {
   waitForWaConnection,
   WhatsAppAuthUnstableError,
 } from "./session.js";
-import { closeWhatsAppSocketAndWait } from "./socket-close.js";
+import { closeWaSocket, closeWhatsAppSocketAndWait } from "./socket-close.js";
 import {
   DEFAULT_WHATSAPP_SOCKET_TIMING,
   type WhatsAppSocketTimingOptions,
@@ -35,6 +35,7 @@ import {
 const LOGGED_OUT_STATUS = 401;
 const POST_PAIRING_RESTART_STATUS = 515;
 const TIMED_OUT_STATUS = 408;
+const SHUTDOWN_CREDS_DRAIN_GRACE_MS = 60_000;
 const WHATSAPP_LOGIN_RESTART_MESSAGE =
   "WhatsApp asked for a restart after pairing (code 515); waiting for creds to save…";
 const WHATSAPP_LOGIN_TIMEOUT_RESTART_MESSAGE =
@@ -135,40 +136,6 @@ type SocketActivityEmitter = {
   removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
 };
 
-async function closeWebSocketBestEffort(sock: { ws?: { close?: () => void | Promise<void> } }) {
-  try {
-    await sock.ws?.close?.();
-  } catch {
-    // ignore best-effort shutdown failures
-  }
-}
-
-export function closeWaSocket(
-  sock:
-    | {
-        end?: (error: Error | undefined) => void | Promise<void>;
-        ws?: { close?: () => void };
-      }
-    | null
-    | undefined,
-): void {
-  try {
-    if (typeof sock?.end === "function") {
-      void Promise.resolve(sock.end(new Error("OpenClaw WhatsApp socket close"))).catch(
-        async () => await closeWebSocketBestEffort(sock),
-      );
-      return;
-    }
-    if (sock) {
-      void closeWebSocketBestEffort(sock);
-    }
-  } catch {
-    if (sock) {
-      void closeWebSocketBestEffort(sock);
-    }
-  }
-}
-
 function stoppedControllerError(): Error {
   return new Error("WhatsApp connection controller is shutting down");
 }
@@ -224,6 +191,8 @@ function throwIfCredentialPersistenceFailed(
 }
 
 export async function waitForWhatsAppLoginResult(params: {
+  /** Retires this account's poll state when WhatsApp logs the device out. */
+  accountId?: string;
   sock: WaSocket;
   authDir: string;
   isLegacyAuthDir: boolean;
@@ -323,6 +292,7 @@ export async function waitForWhatsAppLoginResult(params: {
         closeWaSocket(currentSock);
         const cleared = await logoutWeb({
           authDir: params.authDir,
+          accountId: params.accountId,
           isLegacyAuthDir: params.isLegacyAuthDir,
           runtime: params.runtime,
           beforeCredentialPersistence: params.beforeCredentialPersistence,
@@ -814,8 +784,19 @@ export class WhatsAppConnectionController {
     this.stopDisconnectRetries();
     await this.connectionSetupPromise?.catch(() => {});
     await this.connectionOwnerLeasePromise?.catch(() => {});
-    await this.closeCurrentConnection();
-    await this.finishPendingSocketCleanup();
+    // A restart builds a new controller and never retries this cleanup, so a
+    // cleanup failure must not keep the owner lease: give the creds queue one
+    // last bounded wait, release, then report the original failure.
+    let cleanupError: unknown;
+    let cleanupFailed = false;
+    try {
+      await this.closeCurrentConnection();
+      await this.finishPendingSocketCleanup();
+    } catch (error) {
+      cleanupError = error;
+      cleanupFailed = true;
+      await waitForCredsSaveQueueWithTimeout(this.authDir, SHUTDOWN_CREDS_DRAIN_GRACE_MS);
+    }
     try {
       this.runtimeContextLease?.dispose();
     } finally {
@@ -835,6 +816,9 @@ export class WhatsAppConnectionController {
           this.retainedOwnerReleaseLease = null;
         }
       }
+    }
+    if (cleanupFailed) {
+      throw cleanupError;
     }
   }
 
