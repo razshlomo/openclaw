@@ -1,0 +1,41 @@
+name: Build OpenClaw fork WhatsApp plugin
+
+# fork/2026.11.5 carries only WhatsApp plugin commits; the core is the official
+# npm 2026.11.5 package, so only the WhatsApp external plugin is packed here.
+on:
+  push:
+    branches: [fork/2026.11.5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # WhatsApp is an external plugin (bundledDist: false), so it is packed the way
+      # plugin-npm-release.yml packs it for npm: runtime build, lock check, manifest overlay.
+      - name: Pack the WhatsApp external plugin
+        env:
+          OPENCLAW_PLUGIN_NPM_PACK_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/fork-whatsapp
+        run: bash scripts/plugin-npm-publish.sh --pack extensions/whatsapp
+      - run: sha256sum .artifacts/fork-whatsapp/*.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-whatsapp-fork-${{ github.sha }}
+          path: .artifacts/fork-whatsapp/*.tgz
+          if-no-files-found: error
+          retention-days: 30
