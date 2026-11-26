@@ -13,7 +13,7 @@ import {
 } from "./poll-vote-store.js";
 import { readWhatsAppPollTally, type WhatsAppPollTallyVoter } from "./poll-vote-tally-store.js";
 
-export type WhatsAppPollResultsContextEntry = {
+type WhatsAppPollResultsContextEntry = {
   label: string;
   source: string;
   type: string;
@@ -87,12 +87,10 @@ function describeCreator(record: WhatsAppPollRecord, linkedPhone: boolean): stri
 }
 
 /** Drops voters the chat's context visibility policy hides; they are neither named nor counted. */
-export type WhatsAppPollVoterFilter = (
-  voters: WhatsAppPollTallyVoter[],
-) => WhatsAppPollTallyVoter[];
+type WhatsAppPollVoterFilter = (voters: WhatsAppPollTallyVoter[]) => WhatsAppPollTallyVoter[];
 
 /** Whether the chat's context visibility policy still shows a received poll's creator. */
-export type WhatsAppPollCreatorFilter = (record: WhatsAppPollRecord) => boolean;
+type WhatsAppPollCreatorFilter = (record: WhatsAppPollRecord) => boolean;
 
 export type WhatsAppPollVisibility = {
   filterVoters: WhatsAppPollVoterFilter;

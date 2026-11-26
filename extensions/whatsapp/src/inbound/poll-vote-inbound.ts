@@ -110,6 +110,7 @@ async function captureDecryptFailure(params: {
       }),
     );
   } catch (error) {
+    // SAFETY: only the optional `code` is read, through optional chaining.
     captureError = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown";
   }
   return {
@@ -186,6 +187,7 @@ export async function resolveWhatsAppPollVote(
     logVerbose("whatsapp poll vote for an unknown poll; ignored");
     return { kind: "completed" };
   }
+  // SAFETY: Baileys sets the *Alt fields at runtime without typing them; every field read is optional.
   const key = (msg.key ?? {}) as WAMessageKeyWithAlt;
   const group = Boolean(key.remoteJid && isJidGroup(key.remoteJid));
   const fromMe = Boolean(key.fromMe);
@@ -212,6 +214,7 @@ export async function resolveWhatsAppPollVote(
     pollMessageId,
     creatorJids: [
       creationKey?.participant,
+      // SAFETY: Baileys sets the *Alt fields at runtime without typing them; every field read is optional.
       (creationKey as WAMessageKeyWithAlt | undefined)?.participantAlt,
       ...selfJids,
     ],
@@ -304,6 +307,7 @@ export async function resolveWhatsAppPollRevoke(
   if (!pollMessageId || !record) {
     return false;
   }
+  // SAFETY: Baileys sets the *Alt fields at runtime without typing them; every field read is optional.
   const key = (msg.key ?? {}) as WAMessageKeyWithAlt;
   const chatJids = normalizeWhatsAppPollJids([key.remoteJid, key.remoteJidAlt]);
   if (!record.chatJids.some((jid) => chatJids.includes(jid))) {

@@ -60,3 +60,37 @@ export async function closeWhatsAppSocketAndWait(
   }
   throw new AggregateError(errors, "WhatsApp socket close could not be confirmed");
 }
+
+async function closeWebSocketBestEffort(sock: { ws?: { close?: () => void | Promise<void> } }) {
+  try {
+    await sock.ws?.close?.();
+  } catch {
+    // ignore best-effort shutdown failures
+  }
+}
+
+export function closeWaSocket(
+  sock:
+    | {
+        end?: (error: Error | undefined) => void | Promise<void>;
+        ws?: { close?: () => void };
+      }
+    | null
+    | undefined,
+): void {
+  try {
+    if (typeof sock?.end === "function") {
+      void Promise.resolve(sock.end(new Error("OpenClaw WhatsApp socket close"))).catch(
+        async () => await closeWebSocketBestEffort(sock),
+      );
+      return;
+    }
+    if (sock) {
+      void closeWebSocketBestEffort(sock);
+    }
+  } catch {
+    if (sock) {
+      void closeWebSocketBestEffort(sock);
+    }
+  }
+}

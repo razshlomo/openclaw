@@ -26,7 +26,7 @@ import {
   waitForWaConnection,
   WhatsAppAuthUnstableError,
 } from "./session.js";
-import { closeWhatsAppSocketAndWait } from "./socket-close.js";
+import { closeWaSocket, closeWhatsAppSocketAndWait } from "./socket-close.js";
 import {
   DEFAULT_WHATSAPP_SOCKET_TIMING,
   type WhatsAppSocketTimingOptions,
@@ -135,38 +135,6 @@ type SocketActivityEmitter = {
   off?: (event: string, listener: (...args: unknown[]) => void) => void;
   removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
 };
-
-async function closeWebSocketBestEffort(sock: { ws?: { close?: () => void | Promise<void> } }) {
-  try {
-    await sock.ws?.close?.();
-  } catch {
-    // ignore best-effort shutdown failures
-  }
-}
-
-export function closeWaSocket(
-  sock:
-    | {
-        end?: (error: Error | undefined) => void | Promise<void>;
-        ws?: { close?: () => void };
-      }
-    | null
-    | undefined,
-): void {
-  try {
-    if (typeof sock?.end === "function") {
-      void Promise.resolve(sock.end(new Error("OpenClaw WhatsApp socket close"))).catch(
-        async () => await closeWebSocketBestEffort(sock),
-      );
-      return;
-    }
-  } catch {
-    // Fall through to raw WebSocket cleanup when Baileys end throws.
-  }
-  if (sock) {
-    void closeWebSocketBestEffort(sock);
-  }
-}
 
 function stoppedControllerError(): Error {
   return new Error("WhatsApp connection controller is shutting down");

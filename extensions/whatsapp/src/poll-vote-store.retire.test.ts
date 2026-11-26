@@ -21,7 +21,8 @@ import * as runtimeModule from "./runtime.js";
 
 const hoisted = vi.hoisted(() => ({ oauthDir: "/tmp/openclaw-wa-poll-retire-oauth" }));
 
-vi.mock("./auth-store.runtime.js", () => ({
+vi.mock("./auth-store.runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./auth-store.runtime.js")>()),
   resolveOAuthDir: () => hoisted.oauthDir,
 }));
 

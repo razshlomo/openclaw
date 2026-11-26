@@ -2,7 +2,7 @@
 import type { proto } from "baileys";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 
-export type WhatsAppPollCreationVersion = "v1" | "v2" | "v3" | "v4" | "v5";
+type WhatsAppPollCreationVersion = "v1" | "v2" | "v3" | "v4" | "v5";
 
 export type WhatsAppPollCreationMatch = {
   poll: proto.Message.IPollCreationMessage;

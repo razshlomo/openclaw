@@ -89,7 +89,7 @@ export type WhatsAppPollStoreFault = {
   once?: boolean;
 };
 
-export function createWhatsAppPollStoreFaultError(code: string | undefined): Error {
+function createWhatsAppPollStoreFaultError(code: string | undefined): Error {
   return Object.assign(new Error("injected plugin state failure"), code ? { code } : {});
 }
 
@@ -185,6 +185,7 @@ export async function installWhatsAppPollStateRuntimeForTest() {
     },
   });
   vi.spyOn(runtime.logging, "getChildLogger").mockReturnValue(
+    // SAFETY: the test logger implements every method the poll code calls.
     pollState.logger as unknown as ReturnType<typeof runtime.logging.getChildLogger>,
   );
   setWhatsAppRuntime(runtime);
