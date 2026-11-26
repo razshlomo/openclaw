@@ -194,6 +194,7 @@ describe("WhatsApp poll record store", () => {
 
   it("writes one index row per chat JID, lists newest first with a limit, and expires with the record", async () => {
     const base = Date.now() - 10_000;
+    const writeStartedAt = Date.now();
     await recordWhatsAppPoll(
       pollInput({
         pollMessageId: "A",
@@ -216,6 +217,8 @@ describe("WhatsApp poll record store", () => {
       { mode: "overwrite" },
     );
 
+    // The store stamps expiry at write time; a cold SQLite open can delay that by seconds.
+    const writeWindowMs = Date.now() - writeStartedAt;
     const indexRows = await env.openStore(WHATSAPP_POLL_CHAT_INDEX_STORES.sent).entries();
     expect(indexRows.map((row) => row.key).toSorted()).toEqual(
       [
@@ -243,9 +246,13 @@ describe("WhatsApp poll record store", () => {
 
     const [record] = await env.openStore(WHATSAPP_POLL_RECORD_STORES.sent).entries();
     const expected = base + WHATSAPP_POLL_TTL_MS;
-    expect(Math.abs((record?.expiresAt ?? 0) - expected)).toBeLessThan(5000);
-    for (const row of indexRows.filter((entry) => entry.key.endsWith(":A"))) {
-      expect(Math.abs((row.expiresAt ?? 0) - expected)).toBeLessThan(5000);
+    for (const expiresAt of [
+      record?.expiresAt,
+      ...indexRows.filter((entry) => entry.key.endsWith(":A")).map((row) => row.expiresAt),
+    ]) {
+      const drift = (expiresAt ?? 0) - expected;
+      expect(drift).toBeGreaterThanOrEqual(0);
+      expect(drift).toBeLessThanOrEqual(writeWindowMs);
     }
   });
 

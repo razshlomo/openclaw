@@ -221,13 +221,16 @@ describe("WhatsApp poll tally store", () => {
   it("separates namespaces by origin and expires rows with the poll record", async () => {
     const recordedAt = Date.now() - 60_000;
     const received = pollRecord({ origin: "received", recordedAt });
+    const writeStartedAt = Date.now();
     await vote({ record: received, jids: [PN], selected: ["Pizza"], votedAtMs: 1000 });
+    // The store stamps expiry at write time; a cold SQLite open can delay that by seconds.
+    const writeWindowMs = Date.now() - writeStartedAt;
     expect(await env.openStore(WHATSAPP_POLL_TALLY_STORES.sent).entries()).toEqual([]);
     const [row] = await env.openStore(WHATSAPP_POLL_TALLY_STORES.received).entries();
     expect(row?.key).toBe(`${PREFIX}POLL1:${PN}`);
-    expect(Math.abs((row?.expiresAt ?? 0) - (recordedAt + WHATSAPP_POLL_TTL_MS))).toBeLessThan(
-      5000,
-    );
+    const drift = (row?.expiresAt ?? 0) - (recordedAt + WHATSAPP_POLL_TTL_MS);
+    expect(drift).toBeGreaterThanOrEqual(0);
+    expect(drift).toBeLessThanOrEqual(writeWindowMs);
     expect(await tally(pollRecord({ origin: "sent" }))).toEqual([]);
     expect(await tally(received)).toHaveLength(1);
   });

@@ -531,13 +531,10 @@ export async function listWhatsAppChatPollIds(params: {
 
 /** Deletes every row under a prefix, a page at a time; maxEntries bounds the loop. */
 async function deleteKeyPrefix(
-  store: PluginStateKeyedStore<unknown>,
+  store: PluginStateKeyedStore<unknown, 2>,
   prefix: string,
   maxEntries: number,
 ): Promise<number> {
-  if (typeof store.entriesInKeyRange !== "function") {
-    return 0;
-  }
   let count = 0;
   for (let page = 0; page * DELETE_PAGE_SIZE <= maxEntries; page++) {
     const rows = await store.entriesInKeyRange(
@@ -609,7 +606,7 @@ export async function retireWhatsAppPollState(params: {
   accountId: string;
 }): Promise<{ deleted: number } | undefined> {
   const accountId = params.accountId.trim();
-  if (typeof getOptionalWhatsAppRuntime()?.state?.openKeyedStore !== "function") {
+  if (typeof getOptionalWhatsAppRuntime()?.state?.openKeyedStoreV2 !== "function") {
     return undefined;
   }
   if (!accountId) {
