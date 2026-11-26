@@ -110,6 +110,23 @@ describe("logoutWeb poll state retirement", () => {
     expect(keys.filter((key) => key.startsWith("default%3Ax:"))).toHaveLength(6);
   });
 
+  it("retires through openKeyedStoreV2 when the host has no legacy keyed store", async () => {
+    await addVotedPoll({ accountId: "default", self: SELF }, "sent");
+    // A host whose plugin state exposes only the V2 keyed store.
+    runtimeModule.setWhatsAppRuntime({
+      ...env.runtime,
+      state: { openKeyedStoreV2: env.openKeyedStoreV2, resolveStateDir: () => env.stateDir },
+    } as never);
+    const runtime = createRuntimeSpies();
+    await expect(
+      logoutWeb({ authDir: ownedAuthDir("default"), accountId: "default", runtime }),
+    ).resolves.toBe(true);
+    expect(runtime.log).not.toHaveBeenCalledWith(
+      expect.stringContaining("WhatsApp poll state was not cleared here"),
+    );
+    expect(await storedKeys()).toEqual([]);
+  });
+
   it("still logs out without plugin state and says the rows expire", async () => {
     await addVotedPoll({ accountId: "default", self: SELF }, "sent");
     vi.spyOn(runtimeModule, "getOptionalWhatsAppRuntime").mockReturnValue(null);
