@@ -1,10 +1,10 @@
 name: Build OpenClaw fork WhatsApp plugin
 
-# fork/2026.11.5 carries only WhatsApp plugin commits; the core is the official
-# npm 2026.11.5 package, so only the WhatsApp external plugin is packed here.
+# fork/2026.11.9 carries only WhatsApp plugin commits; the core is the official
+# npm 2026.11.9 package, so only the WhatsApp external plugin is packed here.
 on:
   push:
-    branches: [fork/2026.11.5]
+    branches: [fork/2026.11.9]
   workflow_dispatch:
 
 permissions:
