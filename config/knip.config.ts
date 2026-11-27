@@ -1843,6 +1843,12 @@ const config = {
     "src/gateway/board-view-ticket.ts": ["exports"],
     // Focused startup tests consume this explicit seam; production imports only the bootstrap.
     "src/gateway/server-startup-bootstrap.ts": ["exports"],
+    // Fork-carried WhatsApp poll tests seed stores and read results through these seams;
+    // production uses them inside their owning module. The full-tree scan still audits them.
+    "extensions/whatsapp/src/inbound/poll-creation-record.ts": ["exports"],
+    "extensions/whatsapp/src/poll-results-context.ts": ["exports"],
+    "extensions/whatsapp/src/poll-vote-failure-capture.ts": ["exports"],
+    "extensions/whatsapp/src/poll-vote-store.ts": ["exports"],
     // Registry facades retain direct registration/reset compatibility seams used by focused
     // tests; the full-tree scan still audits every named export against those consumers.
     "src/agents/harness/registry.ts": ["exports"],
